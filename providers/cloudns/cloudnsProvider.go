@@ -48,6 +48,7 @@ var features = providers.DocumentationNotes{
 	providers.CanUseDNAME:            providers.Can(),
 	providers.CanUseDSForChildren:    providers.Can(),
 	providers.CanUseLOC:              providers.Cannot(),
+	providers.CanUseNAPTR:            providers.Can(),
 	providers.CanUsePTR:              providers.Can(),
 	providers.CanUseSRV:              providers.Can(),
 	providers.CanUseSSHFP:            providers.Can(),
@@ -340,6 +341,8 @@ func toRc(domain string, r *domainRecord) *models.RecordConfig {
 	case "CLOUD_WR":
 		rc.Type = "WR"
 		rc.SetTarget(r.Target)
+	case "NAPTR":
+		rc.SetTargetNAPTRStrings(r.NaptrOrder, r.NaptrPref, r.NaptrFlag, r.NaptrParams, r.NaptrRegexp, r.NaptrReplace+".")
 	default:
 		rc.SetTarget(r.Target)
 	}
@@ -388,6 +391,13 @@ func toReq(rc *models.RecordConfig) (requestParams, error) {
 		req["algorithm"] = strconv.Itoa(int(rc.DsAlgorithm))
 		req["digest-type"] = strconv.Itoa(int(rc.DsDigestType))
 		req["record"] = rc.DsDigest
+	case "NAPTR":
+		req["order"] = strconv.Itoa(int(rc.NaptrOrder))
+		req["pref"] = strconv.Itoa(int(rc.NaptrPreference))
+		req["flag"] = rc.NaptrFlags
+		req["params"] = rc.NaptrService
+		req["regexp"] = rc.NaptrRegexp
+		req["replace"] = rc.GetTargetField()
 	default:
 		return nil, fmt.Errorf("ClouDNS.toReq rtype %q unimplemented", rc.Type)
 	}
