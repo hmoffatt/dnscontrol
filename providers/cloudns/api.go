@@ -67,6 +67,12 @@ type domainRecord struct {
 	DsAlgorithm      string `json:"dsalgorithm,omitempty"`
 	DsDigestType     string `json:"digest_type,omitempty"`
 	DsDigest         string `json:"dsdigest,omitempty"`
+	NaptrParams      string `json:"params,omitempty"`
+	NaptrOrder       string `json:"order,omitempty"`
+	NaptrPref        string `json:"pref,omitempty"`
+	NaptrFlag        string `json:"flag,omitempty"`
+	NaptrRegexp      string `json:"regexp,omitempty"`
+	NaptrReplace     string `json:"replace,omitempty"`
 }
 
 type recordResponse map[string]domainRecord
