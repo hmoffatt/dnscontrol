@@ -347,10 +347,7 @@ func toRc(domain string, r *domainRecord) *models.RecordConfig {
 		loc := fmt.Sprintf("%s %s %s %s %s %s %s %s %s %s %s %s",
 			r.LocLatDeg, r.LocLatMin, r.LocLatSec, r.LocLatDir,
 			r.LocLongDeg, r.LocLongMin, r.LocLongSec, r.LocLongDir,
-			// API has altitude as float, which we don't support
-			strings.Split(r.LocAltitude, ".")[0],
-			// strings.Split(r.LocSize, ".")[0], strings.Split(r.LocHPrecision, ".")[0], strings.Split(r.LocVPrecision, ".")[0])
-			r.LocSize, r.LocHPrecision, r.LocVPrecision)
+			r.LocAltitude, r.LocSize, r.LocHPrecision, r.LocVPrecision)
 		rc.SetTargetLOCString(r.Target, loc)
 	default:
 		rc.SetTarget(r.Target)
@@ -426,7 +423,7 @@ func toReq(rc *models.RecordConfig) (requestParams, error) {
 		req["long-min"] = parts[5]
 		req["long-sec"] = parts[6]
 		req["long-dir"] = parts[7]
-		req["altitude"] = strings.Split(parts[8], "m")[0]
+		req["altitude"] = formatLocParam(parts[8])
 		req["size"] = formatLocParam(parts[9])
 		req["h-precision"] = formatLocParam(parts[10])
 		req["v-precision"] = formatLocParam(parts[11])
