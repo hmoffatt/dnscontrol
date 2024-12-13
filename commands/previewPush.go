@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -9,123 +10,46 @@ import (
 	"golang.org/x/net/idna"
 
 	"github.com/StackExchange/dnscontrol/v4/models"
-	"github.com/StackExchange/dnscontrol/v4/pkg/bindserial"
 	"github.com/StackExchange/dnscontrol/v4/pkg/credsfile"
-	"github.com/StackExchange/dnscontrol/v4/pkg/diff2"
 	"github.com/StackExchange/dnscontrol/v4/pkg/nameservers"
 	"github.com/StackExchange/dnscontrol/v4/pkg/normalize"
 	"github.com/StackExchange/dnscontrol/v4/pkg/notifications"
 	"github.com/StackExchange/dnscontrol/v4/pkg/printer"
+	"github.com/StackExchange/dnscontrol/v4/pkg/rfc4183"
 	"github.com/StackExchange/dnscontrol/v4/pkg/zonerecs"
 	"github.com/StackExchange/dnscontrol/v4/providers"
-	"github.com/urfave/cli/v2"
 	"golang.org/x/exp/slices"
 )
 
-var _ = cmd(catMain, func() *cli.Command {
-	var args PreviewArgs
-	return &cli.Command{
-		Name:  "preview",
-		Usage: "read live configuration and identify changes to be made, without applying them",
-		Action: func(ctx *cli.Context) error {
-			return exit(Preview(args))
-		},
-		Flags: args.flags(),
-	}
-}())
-
-// PreviewArgs contains all data/flags needed to run preview, independently of CLI
-type PreviewArgs struct {
-	GetDNSConfigArgs
-	GetCredentialsArgs
-	FilterArgs
-	Notify      bool
-	WarnChanges bool
-	NoPopulate  bool
-	Full        bool
-}
-
-func (args *PreviewArgs) flags() []cli.Flag {
-	flags := args.GetDNSConfigArgs.flags()
-	flags = append(flags, args.GetCredentialsArgs.flags()...)
-	flags = append(flags, args.FilterArgs.flags()...)
-	flags = append(flags, &cli.BoolFlag{
-		Name:        "notify",
-		Destination: &args.Notify,
-		Usage:       `set to true to send notifications to configured destinations`,
-	})
-	flags = append(flags, &cli.BoolFlag{
-		Name:        "expect-no-changes",
-		Destination: &args.WarnChanges,
-		Usage:       `set to true for non-zero return code if there are changes`,
-	})
-	flags = append(flags, &cli.BoolFlag{
-		Name:        "no-populate",
-		Destination: &args.NoPopulate,
-		Usage:       `Use this flag to not auto-create non-existing zones at the provider`,
-	})
-	flags = append(flags, &cli.BoolFlag{
-		Name:        "full",
-		Destination: &args.Full,
-		Usage:       `Add headings, providers names, notifications of no changes, etc`,
-	})
-	flags = append(flags, &cli.Int64Flag{
-		Name:        "bindserial",
-		Destination: &bindserial.ForcedValue,
-		Usage:       `Force BIND serial numbers to this value (for reproducibility)`,
-	})
-	return flags
-}
-
-var _ = cmd(catMain, func() *cli.Command {
-	var args PushArgs
-	return &cli.Command{
-		Name:  "push",
-		Usage: "identify changes to be made, and perform them",
-		Action: func(ctx *cli.Context) error {
-			return exit(Push(args))
-		},
-		Flags: args.flags(),
-	}
-}())
-
-// PushArgs contains all data/flags needed to run push, independently of CLI
-type PushArgs struct {
-	PreviewArgs
-	Interactive bool
-}
-
-func (args *PushArgs) flags() []cli.Flag {
-	flags := args.PreviewArgs.flags()
-	flags = append(flags, &cli.BoolFlag{
-		Name:        "i",
-		Destination: &args.Interactive,
-		Usage:       "Interactive. Confirm or Exclude each correction before they run",
-	})
-	return flags
+// ReportItem is a record of corrections for a particular domain/provider/registrar.
+type ReportItem struct {
+	Domain      string `json:"domain"`
+	Corrections int    `json:"corrections"`
+	Provider    string `json:"provider,omitempty"`
+	Registrar   string `json:"registrar,omitempty"`
 }
 
 // Preview implements the preview subcommand.
-func Preview(args PreviewArgs) error {
-	return run(args, false, false, printer.DefaultPrinter)
+func Preview(args PPreviewArgs) error {
+	return run(args, false, false, printer.DefaultPrinter, &args.Report)
 }
 
 // Push implements the push subcommand.
-func Push(args PushArgs) error {
-	return run(args.PreviewArgs, true, args.Interactive, printer.DefaultPrinter)
+func Push(args PPushArgs) error {
+	return run(args.PPreviewArgs, true, args.Interactive, printer.DefaultPrinter, &args.Report)
 }
 
+var obsoleteDiff2FlagUsed = false
+
 // run is the main routine common to preview/push
-func run(args PreviewArgs, push bool, interactive bool, out printer.CLI) error {
+func run(args PPreviewArgs, push bool, interactive bool, out printer.CLI, report *string) error {
 	// TODO: make truly CLI independent. Perhaps return results on a channel as they occur
 
 	// This is a hack until we have the new printer replacement.
 	printer.SkinnyReport = !args.Full
 
-	if diff2.EnableDiff2 {
-		printer.Println("INFO: Diff2 algorithm in use. Welcome to the future!")
-	} else {
-		printer.Println("WARNING: Diff1 algorithm in use. Please upgrade to diff2 (`dnscontrol --diff2=true preview`) as diff1 will go away after 2023-07-05. See https://github.com/StackExchange/dnscontrol/issues/2262")
+	if obsoleteDiff2FlagUsed {
+		printer.Println("WARNING: Please remove obsolete --diff2 flag. This will be an error in v5 or later. See https://github.com/StackExchange/dnscontrol/issues/2262")
 	}
 
 	cfg, err := GetDNSConfig(args.GetDNSConfigArgs)
@@ -151,7 +75,7 @@ func run(args PreviewArgs, push bool, interactive bool, out printer.CLI) error {
 	// create a WaitGroup with the length of domains for the anonymous functions (later goroutines) to wait for
 	var wg sync.WaitGroup
 	wg.Add(len(cfg.Domains))
-
+	var reportItems []ReportItem
 	// For each domain in dnsconfig.js...
 	for _, domain := range cfg.Domains {
 		// Run preview or push operations per domain as anonymous function, in preparation for the later use of goroutines.
@@ -181,7 +105,8 @@ func run(args PreviewArgs, push bool, interactive bool, out printer.CLI) error {
 					if lister, ok := provider.Driver.(providers.ZoneLister); ok && !push {
 						zones, err := lister.ListZones()
 						if err != nil {
-							out.Errorf("ERROR: %s", err.Error())
+							out.Errorf("ERROR: %s\n", err.Error())
+							anyErrors = true
 							return
 						}
 						aceZoneName, _ := idna.ToASCII(domain.Name)
@@ -197,6 +122,7 @@ func run(args PreviewArgs, push bool, interactive bool, out printer.CLI) error {
 						// this is the actual push, ensure domain exists at DSP
 						if err := creator.EnsureZoneExists(domain.Name); err != nil {
 							out.Warnf("Error creating domain: %s\n", err)
+							anyErrors = true
 							continue // continue with next provider, as we couldn't create this one
 						}
 					}
@@ -206,9 +132,9 @@ func run(args PreviewArgs, push bool, interactive bool, out printer.CLI) error {
 
 			// Correct the registrar...
 
-			nsList, err := nameservers.DetermineNameserversForProviders(domain, providersWithExistingZone)
+			nsList, err := nameservers.DetermineNameserversForProviders(domain, providersWithExistingZone, false)
 			if err != nil {
-				out.Errorf("ERROR: %s", err.Error())
+				out.Errorf("ERROR: %s\n", err.Error())
 				return
 			}
 			domain.Nameservers = nsList
@@ -222,16 +148,19 @@ func run(args PreviewArgs, push bool, interactive bool, out printer.CLI) error {
 					continue
 				}
 
-				reports, corrections, err := zonerecs.CorrectZoneRecords(provider.Driver, domain)
-				printReports(domain.Name, provider.Name, reports, out, push, notifier)
-				out.EndProvider(provider.Name, len(corrections), err)
+				reports, corrections, actualChangeCount, err := zonerecs.CorrectZoneRecords(provider.Driver, domain)
+				out.EndProvider(provider.Name, actualChangeCount, err)
 				if err != nil {
 					anyErrors = true
 					return
 				}
-				totalCorrections += len(corrections)
-				// When diff1 goes away, the call to printReports() should be moved to HERE.
-				//printReports(domain.Name, provider.Name, reports, out, push, notifier)
+				totalCorrections += actualChangeCount
+				printReports(domain.Name, provider.Name, reports, out, push, notifier)
+				reportItems = append(reportItems, ReportItem{
+					Domain:      domain.Name,
+					Corrections: actualChangeCount,
+					Provider:    provider.Name,
+				})
 				anyErrors = printOrRunCorrections(domain.Name, provider.Name, corrections, out, push, interactive, notifier) || anyErrors
 			}
 
@@ -253,6 +182,11 @@ func run(args PreviewArgs, push bool, interactive bool, out printer.CLI) error {
 				return
 			}
 			totalCorrections += len(corrections)
+			reportItems = append(reportItems, ReportItem{
+				Domain:      domain.Name,
+				Corrections: len(corrections),
+				Registrar:   domain.RegistrarName,
+			})
 			anyErrors = printOrRunCorrections(domain.Name, domain.RegistrarName, corrections, out, push, interactive, notifier) || anyErrors
 		}(domain)
 	}
@@ -261,6 +195,7 @@ func run(args PreviewArgs, push bool, interactive bool, out printer.CLI) error {
 	if os.Getenv("TEAMCITY_VERSION") != "" {
 		fmt.Fprintf(os.Stderr, "##teamcity[buildStatus status='SUCCESS' text='%d corrections']", totalCorrections)
 	}
+	rfc4183.PrintWarning()
 	notifier.Done()
 	out.Printf("Done. %d corrections.\n", totalCorrections)
 	if anyErrors {
@@ -268,6 +203,20 @@ func run(args PreviewArgs, push bool, interactive bool, out printer.CLI) error {
 	}
 	if totalCorrections != 0 && args.WarnChanges {
 		return fmt.Errorf("there are pending changes")
+	}
+	if report != nil && *report != "" {
+		f, err := os.OpenFile(*report, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		b, err := json.MarshalIndent(reportItems, "", "  ")
+		if err != nil {
+			return err
+		}
+		if _, err := f.Write(b); err != nil {
+			return err
+		}
 	}
 	return nil
 }

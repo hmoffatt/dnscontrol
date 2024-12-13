@@ -2,6 +2,7 @@ package autodns
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -10,19 +11,19 @@ import (
 	"strings"
 
 	"github.com/StackExchange/dnscontrol/v4/models"
-	"github.com/StackExchange/dnscontrol/v4/pkg/diff"
 	"github.com/StackExchange/dnscontrol/v4/pkg/diff2"
-	"github.com/StackExchange/dnscontrol/v4/pkg/printer"
-	"github.com/StackExchange/dnscontrol/v4/pkg/txtutil"
 	"github.com/StackExchange/dnscontrol/v4/providers"
 )
 
 var features = providers.DocumentationNotes{
+	// The default for unlisted capabilities is 'Cannot'.
+	// See providers/capabilities.go for the entire list of capabilities.
 	providers.CanGetZones:            providers.Can(),
+	providers.CanConcur:              providers.Cannot(),
 	providers.CanUseAlias:            providers.Can(),
-	providers.CanUseCAA:              providers.Cannot(),
+	providers.CanUseCAA:              providers.Can(),
 	providers.CanUseDS:               providers.Cannot(),
-	providers.CanUsePTR:              providers.Cannot(),
+	providers.CanUsePTR:              providers.Can(),
 	providers.CanUseSRV:              providers.Can(),
 	providers.CanUseSSHFP:            providers.Cannot(),
 	providers.CanUseTLSA:             providers.Cannot(),
@@ -37,11 +38,14 @@ type autoDNSProvider struct {
 }
 
 func init() {
+	const providerName = "AUTODNS"
+	const providerMaintainer = "@arnoschoon"
 	fns := providers.DspFuncs{
 		Initializer:   New,
 		RecordAuditor: AuditRecords,
 	}
-	providers.RegisterDomainServiceProviderType("AUTODNS", fns, features)
+	providers.RegisterDomainServiceProviderType(providerName, fns, features)
+	providers.RegisterMaintainer(providerName, providerMaintainer)
 }
 
 // New creates a new API handle.
@@ -68,104 +72,14 @@ func New(settings map[string]string, _ json.RawMessage) (providers.DNSServicePro
 }
 
 // GetZoneRecordsCorrections returns a list of corrections that will turn existing records into dc.Records.
-func (api *autoDNSProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, existingRecords models.Records) ([]*models.Correction, error) {
+func (api *autoDNSProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, existingRecords models.Records) ([]*models.Correction, int, error) {
 	domain := dc.Name
-	txtutil.SplitSingleLongTxt(dc.Records) // Autosplit long TXT records
 
-	var changes []*models.RecordConfig
 	var corrections []*models.Correction
-	if !diff2.EnableDiff2 {
 
-		differ := diff.New(dc)
-		unchanged, create, del, modify, err := differ.IncrementalDiff(existingRecords)
-		if err != nil {
-			return nil, err
-		}
-
-		for _, m := range unchanged {
-			changes = append(changes, m.Desired)
-		}
-
-		for _, m := range del {
-			// Just notify, these records don't have to be deleted explicitly
-			printer.Debugf(m.String())
-		}
-
-		for _, m := range create {
-			printer.Debugf(m.String())
-			changes = append(changes, m.Desired)
-		}
-
-		for _, m := range modify {
-			printer.Debugf("mod")
-			printer.Debugf(m.String())
-			changes = append(changes, m.Desired)
-		}
-
-		if len(create) > 0 || len(del) > 0 || len(modify) > 0 {
-			corrections = append(corrections,
-				&models.Correction{
-					Msg: "Zone update for " + domain,
-					F: func() error {
-						zoneTTL := uint32(0)
-						nameServers := []*models.Nameserver{}
-						resourceRecords := []*ResourceRecord{}
-
-						for _, record := range changes {
-							// NS records for the APEX should be handled differently
-							if record.Type == "NS" && record.Name == "@" {
-								nameServers = append(nameServers, &models.Nameserver{
-									Name: strings.TrimSuffix(record.GetTargetField(), "."),
-								})
-
-								zoneTTL = record.TTL
-							} else {
-								resourceRecord := &ResourceRecord{
-									Name:  record.Name,
-									TTL:   int64(record.TTL),
-									Type:  record.Type,
-									Value: record.GetTargetField(),
-								}
-
-								if resourceRecord.Name == "@" {
-									resourceRecord.Name = ""
-								}
-
-								if record.Type == "MX" {
-									resourceRecord.Pref = int32(record.MxPreference)
-								}
-
-								if record.Type == "SRV" {
-									resourceRecord.Value = fmt.Sprintf(
-										"%d %d %d %s",
-										record.SrvPriority,
-										record.SrvWeight,
-										record.SrvPort,
-										record.GetTargetField(),
-									)
-								}
-
-								resourceRecords = append(resourceRecords, resourceRecord)
-							}
-						}
-
-						err := api.updateZone(domain, resourceRecords, nameServers, zoneTTL)
-
-						if err != nil {
-							return fmt.Errorf(err.Error())
-						}
-
-						return nil
-					},
-				})
-		}
-
-		return corrections, nil
-	}
-
-	msgs, changed, err := diff2.ByZone(existingRecords, dc, nil)
+	msgs, changed, actualChangeCount, err := diff2.ByZone(existingRecords, dc, nil)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if changed {
 
@@ -185,7 +99,7 @@ func (api *autoDNSProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, e
 
 					err := api.updateZone(domain, resourceRecords, nameServers, zoneTTL)
 					if err != nil {
-						return fmt.Errorf(err.Error())
+						return errors.New(err.Error())
 					}
 
 					return nil
@@ -194,7 +108,7 @@ func (api *autoDNSProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, e
 
 	}
 
-	return corrections, nil
+	return corrections, actualChangeCount, nil
 }
 
 func recordsToNative(recs models.Records) ([]*models.Nameserver, uint32, []*ResourceRecord) {
@@ -232,6 +146,14 @@ func recordsToNative(recs models.Records) ([]*models.Nameserver, uint32, []*Reso
 					record.SrvPriority,
 					record.SrvWeight,
 					record.SrvPort,
+					record.GetTargetField(),
+				)
+			}
+
+			if record.Type == "CAA" {
+				resourceRecord.Value = fmt.Sprintf("%d %s \"%s\"",
+					record.CaaFlag,
+					record.CaaTag,
 					record.GetTargetField(),
 				)
 			}

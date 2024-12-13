@@ -17,8 +17,17 @@ Info required in `creds.json`:
    - host                DNS over HTTPS host (eg 9.9.9.9)
 */
 
+var features = providers.DocumentationNotes{
+	// The default for unlisted capabilities is 'Cannot'.
+	// See providers/capabilities.go for the entire list of capabilities.
+	providers.CanConcur: providers.Cannot(),
+}
+
 func init() {
-	providers.RegisterRegistrarType("DNSOVERHTTPS", newDNSOverHTTPS)
+	const providerName = "DNSOVERHTTPS"
+	const providerMaintainer = "@mikenz"
+	providers.RegisterRegistrarType(providerName, newDNSOverHTTPS, features)
+	providers.RegisterMaintainer(providerName, providerMaintainer)
 }
 
 func newDNSOverHTTPS(m map[string]string) (providers.Registrar, error) {
@@ -54,7 +63,7 @@ func (c *dohProvider) GetRegistrarCorrections(dc *models.DomainConfig) ([]*model
 		{
 			Msg: fmt.Sprintf("Update nameservers %s -> %s", foundNameservers, expectedNameservers),
 			F: func() error {
-				return c.updateNameservers(expected, dc.Name)
+				return c.updateNameservers(dc.Name)
 			},
 		},
 	}, nil

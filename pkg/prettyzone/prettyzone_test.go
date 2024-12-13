@@ -3,8 +3,10 @@ package prettyzone
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
+	"strings"
 	"testing"
 
 	"github.com/StackExchange/dnscontrol/v4/models"
@@ -28,7 +30,7 @@ func parseAndRegen(t *testing.T, buf *bytes.Buffer, expected string) {
 
 	// Generate it back:
 	buf2 := &bytes.Buffer{}
-	WriteZoneFileRR(buf2, parsed, "bosun.org")
+	writeZoneFileRR(buf2, parsed, "bosun.org")
 
 	// Compare:
 	if buf2.String() != expected {
@@ -36,6 +38,29 @@ func parseAndRegen(t *testing.T, buf *bytes.Buffer, expected string) {
 	}
 }
 
+// rrstoRCs converts []dns.RR to []RecordConfigs.
+func rrstoRCs(rrs []dns.RR, origin string) (models.Records, error) {
+	rcs := make(models.Records, 0, len(rrs))
+	for _, r := range rrs {
+		rc, err := models.RRtoRC(r, origin)
+		if err != nil {
+			return nil, err
+		}
+
+		rcs = append(rcs, &rc)
+	}
+	return rcs, nil
+}
+
+// writeZoneFileRR is a helper for when you have []dns.RR instead of models.Records
+func writeZoneFileRR(w io.Writer, records []dns.RR, origin string) error {
+	rcs, err := rrstoRCs(records, origin)
+	if err != nil {
+		return err
+	}
+
+	return WriteZoneFileRC(w, rcs, origin, 0, nil)
+}
 func TestMostCommonTtl(t *testing.T) {
 	var records []dns.RR
 	var g, e uint32
@@ -48,7 +73,7 @@ func TestMostCommonTtl(t *testing.T) {
 	// All records are TTL=100
 	records = nil
 	records, e = append(records, r1, r1, r1), 100
-	x, err := models.RRstoRCs(records, "bosun.org")
+	x, err := rrstoRCs(records, "bosun.org")
 	if err != nil {
 		panic(err)
 	}
@@ -60,7 +85,7 @@ func TestMostCommonTtl(t *testing.T) {
 	// Mixture of TTLs with an obvious winner.
 	records = nil
 	records, e = append(records, r1, r2, r2), 200
-	rcs, err := models.RRstoRCs(records, "bosun.org")
+	rcs, err := rrstoRCs(records, "bosun.org")
 	if err != nil {
 		panic(err)
 	}
@@ -72,7 +97,7 @@ func TestMostCommonTtl(t *testing.T) {
 	// 3-way tie. Largest TTL should be used.
 	records = nil
 	records, e = append(records, r1, r2, r3), 300
-	rcs, err = models.RRstoRCs(records, "bosun.org")
+	rcs, err = rrstoRCs(records, "bosun.org")
 	if err != nil {
 		panic(err)
 	}
@@ -84,7 +109,7 @@ func TestMostCommonTtl(t *testing.T) {
 	// NS records are ignored.
 	records = nil
 	records, e = append(records, r1, r4, r5), 100
-	rcs, err = models.RRstoRCs(records, "bosun.org")
+	rcs, err = rrstoRCs(records, "bosun.org")
 	if err != nil {
 		panic(err)
 	}
@@ -102,7 +127,7 @@ func TestWriteZoneFileSimple(t *testing.T) {
 	r2, _ := dns.NewRR("bosun.org. 300 IN A 192.30.252.154")
 	r3, _ := dns.NewRR("www.bosun.org. 300 IN CNAME bosun.org.")
 	buf := &bytes.Buffer{}
-	WriteZoneFileRR(buf, []dns.RR{r1, r2, r3}, "bosun.org")
+	writeZoneFileRR(buf, []dns.RR{r1, r2, r3}, "bosun.org")
 	expected := `$TTL 300
 @                IN A     192.30.252.153
                  IN A     192.30.252.154
@@ -123,7 +148,7 @@ func TestWriteZoneFileSimpleTtl(t *testing.T) {
 	r3, _ := dns.NewRR("bosun.org. 100 IN A 192.30.252.155")
 	r4, _ := dns.NewRR("www.bosun.org. 300 IN CNAME bosun.org.")
 	buf := &bytes.Buffer{}
-	WriteZoneFileRR(buf, []dns.RR{r1, r2, r3, r4}, "bosun.org")
+	writeZoneFileRR(buf, []dns.RR{r1, r2, r3, r4}, "bosun.org")
 	expected := `$TTL 100
 @                IN A     192.30.252.153
                  IN A     192.30.252.154
@@ -153,7 +178,7 @@ func TestWriteZoneFileMx(t *testing.T) {
 	r8, _ := dns.NewRR("ccc.bosun.org. IN MX 40 aaa.example.com.")
 	r9, _ := dns.NewRR("ccc.bosun.org. IN MX 1 ttt.example.com.")
 	buf := &bytes.Buffer{}
-	WriteZoneFileRR(buf, []dns.RR{r1, r2, r3, r4, r5, r6, r7, r8, r9}, "bosun.org")
+	writeZoneFileRR(buf, []dns.RR{r1, r2, r3, r4, r5, r6, r7, r8, r9}, "bosun.org")
 	if buf.String() != testdataZFMX {
 		t.Log(buf.String())
 		t.Log(testdataZFMX)
@@ -182,7 +207,7 @@ func TestWriteZoneFileSrv(t *testing.T) {
 	r4, _ := dns.NewRR(`bosun.org. 300 IN SRV 20 10 5050 foo.com.`)
 	r5, _ := dns.NewRR(`bosun.org. 300 IN SRV 10 10 5050 foo.com.`)
 	buf := &bytes.Buffer{}
-	WriteZoneFileRR(buf, []dns.RR{r1, r2, r3, r4, r5}, "bosun.org")
+	writeZoneFileRR(buf, []dns.RR{r1, r2, r3, r4, r5}, "bosun.org")
 	if buf.String() != testdataZFSRV {
 		t.Log(buf.String())
 		t.Log(testdataZFSRV)
@@ -205,7 +230,7 @@ func TestWriteZoneFilePtr(t *testing.T) {
 	r2, _ := dns.NewRR(`bosun.org. 300 IN PTR barney.bosun.org.`)
 	r3, _ := dns.NewRR(`bosun.org. 300 IN PTR alex.bosun.org.`)
 	buf := &bytes.Buffer{}
-	WriteZoneFileRR(buf, []dns.RR{r1, r2, r3}, "bosun.org")
+	writeZoneFileRR(buf, []dns.RR{r1, r2, r3}, "bosun.org")
 	if buf.String() != testdataZFPTR {
 		t.Log(buf.String())
 		t.Log(testdataZFPTR)
@@ -229,7 +254,7 @@ func TestWriteZoneFileCaa(t *testing.T) {
 	r5, _ := dns.NewRR(`bosun.org. 300 IN CAA 0 iodef "https://example.net"`)
 	r6, _ := dns.NewRR(`bosun.org. 300 IN CAA 1 iodef "mailto:example.com"`)
 	buf := &bytes.Buffer{}
-	WriteZoneFileRR(buf, []dns.RR{r1, r2, r3, r4, r5, r6}, "bosun.org")
+	writeZoneFileRR(buf, []dns.RR{r1, r2, r3, r4, r5, r6}, "bosun.org")
 	if buf.String() != testdataZFCAA {
 		t.Log(buf.String())
 		t.Log(testdataZFCAA)
@@ -246,6 +271,46 @@ var testdataZFCAA = `$TTL 300
                  IN CAA   0 issue "letsencrypt.org"
                  IN CAA   0 issuewild ";"
 `
+
+// r is shorthand for strings.Repeat()
+func r(s string, c int) string { return strings.Repeat(s, c) }
+
+func TestWriteZoneFileTxt(t *testing.T) {
+	// Do round-trip tests on various length TXT records.
+	t10 := `t10              IN TXT   "ten4567890"`
+	t254 := `t254             IN TXT   "` + r("a", 254) + `"`
+	t255 := `t255             IN TXT   "` + r("b", 255) + `"`
+	t256 := `t256             IN TXT   "` + r("c", 255) + `" "` + r("D", 1) + `"`
+	t509 := `t509             IN TXT   "` + r("e", 255) + `" "` + r("F", 254) + `"`
+	t510 := `t510             IN TXT   "` + r("g", 255) + `" "` + r("H", 255) + `"`
+	t511 := `t511             IN TXT   "` + r("i", 255) + `" "` + r("J", 255) + `" "` + r("k", 1) + `"`
+	t512 := `t511             IN TXT   "` + r("L", 255) + `" "` + r("M", 255) + `" "` + r("n", 2) + `"`
+	t513 := `t511             IN TXT   "` + r("o", 255) + `" "` + r("P", 255) + `" "` + r("q", 3) + `"`
+	for i, d := range []string{t10, t254, t255, t256, t509, t510, t511, t512, t513} {
+		// Make the rr:
+		rr, err := dns.NewRR(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Make the expected zonefile:
+		ez := "$TTL 3600\n" + d + "\n"
+
+		// Generate the zonefile:
+		buf := &bytes.Buffer{}
+		writeZoneFileRR(buf, []dns.RR{rr}, "bosun.org")
+		gz := buf.String()
+		if gz != ez {
+			t.Log("got: " + gz)
+			t.Log("wnt: " + ez)
+			t.Fatalf("Zone file %d does not match.", i)
+		}
+
+		// Reverse the process. Turn the zonefile into a list of records
+		parseAndRegen(t, buf, ez)
+	}
+
+}
 
 // Test 1 of each record type
 
@@ -272,8 +337,14 @@ func TestWriteZoneFileEach(t *testing.T) {
 	d = append(d, mustNewRR(`_443._tcp.bosun.org. 300 IN TLSA  3 1 1 abcdef0`)) // Label must be _port._proto
 	d = append(d, mustNewRR(`sub.bosun.org.       300 IN NS    bosun.org.`))    // Must be a label with no other records.
 	d = append(d, mustNewRR(`x.bosun.org.         300 IN CNAME bosun.org.`))    // Must be a label with no other records.
+	d = append(d, mustNewRR(`bosun.org.           300 IN DHCID   AAIBY2/AuCccgoJbsaxcQc9TUapptP69lOjxfNuVAA2kjEA=`))
+	d = append(d, mustNewRR(`dname.bosun.org.     300 IN DNAME   example.com.`))
+	d = append(d, mustNewRR(`dnssec.bosun.org.    300 IN DS      31334 13 2 94cc505ebc36b1f4e051268b820efb230f1572d445e833bb5bf7380d6c2cbc0a`))
+	d = append(d, mustNewRR(`dnssec.bosun.org.    300 IN DNSKEY  257 3 13 rNR701yiOPHfqDP53GnsHZdlsRqI7O1ksk60rnFILZVk7Z4eTBd1U49oSkTNVNox9tb7N15N2hboXoMEyFFzcw==`))
+	d = append(d, mustNewRR(`bosun.org.           300 IN HTTPS 1 . alpn="h3,h2"`))
+	d = append(d, mustNewRR(`bosun.org.           300 IN SVCB 1 . alpn="h3,h2"`))
 	buf := &bytes.Buffer{}
-	WriteZoneFileRR(buf, d, "bosun.org")
+	writeZoneFileRR(buf, d, "bosun.org")
 	if buf.String() != testdataZFEach {
 		t.Log(buf.String())
 		t.Log(testdataZFEach)
@@ -289,8 +360,14 @@ var testdataZFEach = `$TTL 300
                  IN SRV   10 10 9999 foo.com.
                  IN TXT   "my text"
                  IN CAA   0 issue "letsencrypt.org"
+                 IN DHCID AAIBY2/AuCccgoJbsaxcQc9TUapptP69lOjxfNuVAA2kjEA=
+                 IN HTTPS 1 . alpn="h3,h2"
+                 IN SVCB  1 . alpn="h3,h2"
 4.5              IN PTR   y.bosun.org.
 _443._tcp        IN TLSA  3 1 1 abcdef0
+dname            IN DNAME example.com.
+dnssec           IN DNSKEY 257 3 13 rNR701yiOPHfqDP53GnsHZdlsRqI7O1ksk60rnFILZVk7Z4eTBd1U49oSkTNVNox9tb7N15N2hboXoMEyFFzcw==
+                 IN DS    31334 13 2 94CC505EBC36B1F4E051268B820EFB230F1572D445E833BB5BF7380D6C2CBC0A
 sub              IN NS    bosun.org.
 x                IN CNAME bosun.org.
 `
@@ -304,7 +381,7 @@ func TestWriteZoneFileSynth(t *testing.T) {
 	rsynz := &models.RecordConfig{Type: "R53_ALIAS", TTL: 300}
 	rsynz.SetLabel("zalias", "bosun.org")
 
-	recs, err := models.RRstoRCs([]dns.RR{r1, r2, r3}, "bosun.org")
+	recs, err := rrstoRCs([]dns.RR{r1, r2, r3}, "bosun.org")
 	if err != nil {
 		panic(err)
 	}
@@ -321,10 +398,10 @@ func TestWriteZoneFileSynth(t *testing.T) {
 ; c4
 @                IN A     192.30.252.153
                  IN A     192.30.252.154
-;myalias          IN R53_ALIAS  atype= zone_id=
-;myalias          IN R53_ALIAS  atype= zone_id=
+;myalias          IN R53_ALIAS  atype= zone_id= evaluate_target_health=
+;myalias          IN R53_ALIAS  atype= zone_id= evaluate_target_health=
 www              IN CNAME bosun.org.
-;zalias           IN R53_ALIAS  atype= zone_id=
+;zalias           IN R53_ALIAS  atype= zone_id= evaluate_target_health=
 `
 	if buf.String() != expected {
 		t.Log(buf.String())
@@ -361,7 +438,7 @@ func TestWriteZoneFileOrder(t *testing.T) {
 	}
 
 	buf := &bytes.Buffer{}
-	WriteZoneFileRR(buf, records, "stackoverflow.com")
+	writeZoneFileRR(buf, records, "stackoverflow.com")
 	// Compare
 	if buf.String() != testdataOrder {
 		t.Log("Found:")
@@ -381,7 +458,7 @@ func TestWriteZoneFileOrder(t *testing.T) {
 		}
 		// Generate
 		buf := &bytes.Buffer{}
-		WriteZoneFileRR(buf, records, "stackoverflow.com")
+		writeZoneFileRR(buf, records, "stackoverflow.com")
 		// Compare
 		if buf.String() != testdataOrder {
 			t.Log(buf.String())

@@ -16,8 +16,17 @@ type easynameProvider struct {
 	domains  map[string]easynameDomain
 }
 
+var features = providers.DocumentationNotes{
+	// The default for unlisted capabilities is 'Cannot'.
+	// See providers/capabilities.go for the entire list of capabilities.
+	providers.CanConcur: providers.Cannot(),
+}
+
 func init() {
-	providers.RegisterRegistrarType("EASYNAME", newEasyname)
+	const providerName = "EASYNAME"
+	const providerMaintainer = "@tresni"
+	providers.RegisterRegistrarType(providerName, newEasyname, features)
+	providers.RegisterMaintainer(providerName, providerMaintainer)
 }
 
 func newEasyname(m map[string]string) (providers.Registrar, error) {

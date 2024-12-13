@@ -21,7 +21,10 @@ type namedotcomProvider struct {
 }
 
 var features = providers.DocumentationNotes{
+	// The default for unlisted capabilities is 'Cannot'.
+	// See providers/capabilities.go for the entire list of capabilities.
 	providers.CanGetZones:            providers.Can(),
+	providers.CanConcur:              providers.Cannot(),
 	providers.CanUseAlias:            providers.Can(),
 	providers.CanUseLOC:              providers.Cannot(),
 	providers.CanUsePTR:              providers.Cannot("PTR records are not supported (See Link)", "https://www.name.com/support/articles/205188508-Reverse-DNS-records"),
@@ -62,10 +65,13 @@ func newProvider(conf map[string]string) (*namedotcomProvider, error) {
 }
 
 func init() {
-	providers.RegisterRegistrarType("NAMEDOTCOM", newReg)
+	const providerName = "NAMEDOTCOM"
+	const providerMaintainer = "NEEDS VOLUNTEER"
+	providers.RegisterRegistrarType(providerName, newReg)
 	fns := providers.DspFuncs{
 		Initializer:   newDsp,
 		RecordAuditor: AuditRecords,
 	}
 	providers.RegisterDomainServiceProviderType("NAMEDOTCOM", fns, features)
+	providers.RegisterMaintainer(providerName, providerMaintainer)
 }

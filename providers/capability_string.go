@@ -9,30 +9,35 @@ func _() {
 	// Re-run the stringer command to generate them again.
 	var x [1]struct{}
 	_ = x[CanAutoDNSSEC-0]
-	_ = x[CanGetZones-1]
-	_ = x[CanUseAKAMAICDN-2]
-	_ = x[CanUseAlias-3]
-	_ = x[CanUseAzureAlias-4]
-	_ = x[CanUseCAA-5]
-	_ = x[CanUseDS-6]
-	_ = x[CanUseDSForChildren-7]
-	_ = x[CanUseLOC-8]
-	_ = x[CanUseNAPTR-9]
-	_ = x[CanUsePTR-10]
-	_ = x[CanUseRoute53Alias-11]
-	_ = x[CanUseSOA-12]
-	_ = x[CanUseSRV-13]
-	_ = x[CanUseSSHFP-14]
-	_ = x[CanUseTLSA-15]
-	_ = x[CantUseNOPURGE-16]
-	_ = x[DocCreateDomains-17]
-	_ = x[DocDualHost-18]
-	_ = x[DocOfficiallySupported-19]
+	_ = x[CanConcur-1]
+	_ = x[CanGetZones-2]
+	_ = x[CanUseAKAMAICDN-3]
+	_ = x[CanUseAlias-4]
+	_ = x[CanUseAzureAlias-5]
+	_ = x[CanUseCAA-6]
+	_ = x[CanUseDHCID-7]
+	_ = x[CanUseDNAME-8]
+	_ = x[CanUseDS-9]
+	_ = x[CanUseDSForChildren-10]
+	_ = x[CanUseHTTPS-11]
+	_ = x[CanUseLOC-12]
+	_ = x[CanUseNAPTR-13]
+	_ = x[CanUsePTR-14]
+	_ = x[CanUseRoute53Alias-15]
+	_ = x[CanUseSOA-16]
+	_ = x[CanUseSRV-17]
+	_ = x[CanUseSSHFP-18]
+	_ = x[CanUseSVCB-19]
+	_ = x[CanUseTLSA-20]
+	_ = x[CanUseDNSKEY-21]
+	_ = x[DocCreateDomains-22]
+	_ = x[DocDualHost-23]
+	_ = x[DocOfficiallySupported-24]
 }
 
-const _Capability_name = "CanAutoDNSSECCanGetZonesCanUseAKAMAICDNCanUseAliasCanUseAzureAliasCanUseCAACanUseDSCanUseDSForChildrenCanUseLOCCanUseNAPTRCanUsePTRCanUseRoute53AliasCanUseSOACanUseSRVCanUseSSHFPCanUseTLSACantUseNOPURGEDocCreateDomainsDocDualHostDocOfficiallySupported"
+const _Capability_name = "CanAutoDNSSECCanConcurCanGetZonesCanUseAKAMAICDNCanUseAliasCanUseAzureAliasCanUseCAACanUseDHCIDCanUseDNAMECanUseDSCanUseDSForChildrenCanUseHTTPSCanUseLOCCanUseNAPTRCanUsePTRCanUseRoute53AliasCanUseSOACanUseSRVCanUseSSHFPCanUseSVCBCanUseTLSACanUseDNSKEYDocCreateDomainsDocDualHostDocOfficiallySupported"
 
-var _Capability_index = [...]uint8{0, 13, 24, 39, 50, 66, 75, 83, 102, 111, 122, 131, 149, 158, 167, 178, 188, 202, 218, 229, 251}
+var _Capability_index = [...]uint16{0, 13, 22, 33, 48, 59, 75, 84, 95, 106, 114, 133, 144, 153, 164, 173, 191, 200, 209, 220, 230, 240, 252, 268, 279, 301}
 
 func (i Capability) String() string {
 	if i >= Capability(len(_Capability_index)-1) {

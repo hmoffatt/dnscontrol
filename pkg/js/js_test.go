@@ -41,7 +41,7 @@ func TestParsedFiles(t *testing.T) {
 			var err error
 
 			// Compile the .js file:
-			conf, err := ExecuteJavascript(string(filepath.Join(testDir, name)), true, nil)
+			conf, err := ExecuteJavaScript(string(filepath.Join(testDir, name)), true, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -86,7 +86,7 @@ func TestParsedFiles(t *testing.T) {
 			as := string(actualJSON)
 			_, _ = es, as
 			// When debugging, leave behind the actual result:
-			//os.WriteFile(expectedFile+".ACTUAL", []byte(as), 0644)
+			os.WriteFile(expectedFile+".ACTUAL", []byte(as), 0644) // Leave behind the actual result:
 			testifyrequire.JSONEqf(t, es, as, "EXPECTING %q = \n```\n%s\n```", expectedFile, as)
 
 			// For each domain, if there is a zone file, test against it:
@@ -141,10 +141,11 @@ func TestErrors(t *testing.T) {
 		{"Bad cidr", `D(reverse("foo.com"), "reg")`},
 		{"Dup domains", `D("example.org", "reg"); D("example.org", "reg")`},
 		{"Bad NAMESERVER", `D("example.com","reg", NAMESERVER("@","ns1.foo.com."))`},
+		{"Bad Hash function", `D(HASH("123", "abc"),"reg")`},
 	}
 	for _, tst := range tests {
 		t.Run(tst.desc, func(t *testing.T) {
-			if _, err := ExecuteJavascript(tst.text, true, nil); err == nil {
+			if _, err := ExecuteJavaScript(tst.text, true, nil); err == nil {
 				t.Fatal("Expected error but found none")
 			}
 		})

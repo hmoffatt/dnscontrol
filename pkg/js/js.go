@@ -11,6 +11,7 @@ import (
 
 	"github.com/StackExchange/dnscontrol/v4/models"
 	"github.com/StackExchange/dnscontrol/v4/pkg/printer"
+	"github.com/StackExchange/dnscontrol/v4/pkg/rfc4183"
 	"github.com/StackExchange/dnscontrol/v4/pkg/transform"
 	"github.com/robertkrimen/otto"              // load underscore js into vm by default
 	_ "github.com/robertkrimen/otto/underscore" // required by otto
@@ -35,8 +36,8 @@ var currentDirectory string
 // EnableFetch sets whether to enable fetch() in JS execution environment
 var EnableFetch bool = false
 
-// ExecuteJavascript accepts a javascript file and runs it, returning the resulting dnsConfig.
-func ExecuteJavascript(file string, devMode bool, variables map[string]string) (*models.DNSConfig, error) {
+// ExecuteJavaScript accepts a javascript file and runs it, returning the resulting dnsConfig.
+func ExecuteJavaScript(file string, devMode bool, variables map[string]string) (*models.DNSConfig, error) {
 	script, err := os.ReadFile(file)
 	if err != nil {
 		return nil, err
@@ -70,8 +71,10 @@ func ExecuteJavascriptString(script []byte, devMode bool, variables map[string]s
 
 	vm.Set("require", require)
 	vm.Set("REV", reverse)
+	vm.Set("REVCOMPAT", reverseCompat)
 	vm.Set("glob", listFiles) // used for require_glob()
 	vm.Set("PANIC", jsPanic)
+	vm.Set("HASH", hashFunc)
 
 	// add cli variables to otto
 	for key, value := range variables {
@@ -155,7 +158,8 @@ func require(call otto.FunctionCall) otto.Value {
 	var value = otto.TrueValue()
 
 	// If its a json file return the json value, else default to true
-	if strings.HasSuffix(filepath.Ext(relFile), "json") {
+	var ext = strings.ToLower(filepath.Ext(relFile))
+	if strings.HasSuffix(ext, "json") || strings.HasSuffix(ext, "json5") {
 		cmd := fmt.Sprintf(`JSON.parse(JSON.stringify(%s))`, string(data))
 		value, err = call.Otto.Run(cmd)
 	} else {
@@ -288,5 +292,18 @@ func reverse(call otto.FunctionCall) otto.Value {
 		throw(call.Otto, err.Error())
 	}
 	v, _ := otto.ToValue(rev)
+	return v
+}
+
+func reverseCompat(call otto.FunctionCall) otto.Value {
+	if len(call.ArgumentList) != 1 {
+		throw(call.Otto, "REVCOMPAT takes exactly one argument")
+	}
+	dom := call.Argument(0).String()
+	err := rfc4183.SetCompatibilityMode(dom)
+	if err != nil {
+		throw(call.Otto, err.Error())
+	}
+	v, _ := otto.ToValue(nil)
 	return v
 }

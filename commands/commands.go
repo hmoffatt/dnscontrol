@@ -12,6 +12,8 @@ import (
 	"github.com/StackExchange/dnscontrol/v4/pkg/js"
 	"github.com/StackExchange/dnscontrol/v4/pkg/printer"
 	"github.com/urfave/cli/v2"
+
+	"github.com/fatih/color"
 )
 
 // categories of commands
@@ -22,11 +24,6 @@ const (
 )
 
 var commands = []*cli.Command{}
-
-// These are set by/for goreleaser
-var (
-	version = "dev"
-)
 
 func cmd(cat string, c *cli.Command) bool {
 	c.Category = cat
@@ -50,11 +47,12 @@ func Run(v string) int {
 	app.Version = version
 	app.Name = "dnscontrol"
 	app.HideVersion = true
-	app.Usage = "dnscontrol is a compiler and DSL for managing dns zones"
+	app.Usage = "DNSControl is a compiler and DSL for managing dns zones"
 	app.Flags = []cli.Flag{
 		&cli.BoolFlag{
-			Name:        "v",
-			Usage:       "Enable detailed logging",
+			Name:        "debug",
+			Aliases:     []string{"v"},
+			Usage:       "Enable debug logging",
 			Destination: &printer.DefaultPrinter.Verbose,
 		},
 		&cli.BoolFlag{
@@ -63,15 +61,47 @@ func Run(v string) int {
 			Destination: &js.EnableFetch,
 		},
 		&cli.BoolFlag{
-			Name:        "diff2",
-			Usage:       "Enable replacement diff algorithm",
-			Destination: &diff2.EnableDiff2,
-			Value:       true,
+			Name:   "diff2",
+			Usage:  "Obsolete flag. Will be removed in v5 or later",
+			Hidden: true,
+			Action: func(ctx *cli.Context, v bool) error {
+				obsoleteDiff2FlagUsed = true
+				return nil
+			},
+		},
+		&cli.BoolFlag{
+			Name:        "disableordering",
+			Usage:       "Disables update reordering",
+			Destination: &diff2.DisableOrdering,
+		},
+		&cli.BoolFlag{
+			Name:        "no-colors",
+			Usage:       "Disable colors",
+			Destination: &color.NoColor,
+			Value:       false,
 		},
 	}
 	sort.Sort(cli.CommandsByName(commands))
 	app.Commands = commands
 	app.EnableBashCompletion = true
+	app.BashComplete = func(cCtx *cli.Context) {
+		// ripped from cli.DefaultCompleteWithFlags
+		var lastArg string
+
+		if len(os.Args) > 2 {
+			lastArg = os.Args[len(os.Args)-2]
+		}
+
+		if lastArg != "" {
+			if strings.HasPrefix(lastArg, "-") {
+				if !islastFlagComplete(lastArg, app.Flags) {
+					dnscontrolPrintFlagSuggestions(lastArg, app.Flags, cCtx.App.Writer)
+					return
+				}
+			}
+		}
+		dnscontrolPrintCommandSuggestions(app.Commands, cCtx.App.Writer)
+	}
 	if err := app.Run(os.Args); err != nil {
 		return 1
 	}

@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/StackExchange/dnscontrol/v4/models"
-	"github.com/StackExchange/dnscontrol/v4/pkg/diff"
 	"github.com/StackExchange/dnscontrol/v4/pkg/diff2"
 	"github.com/StackExchange/dnscontrol/v4/providers"
 )
@@ -20,7 +19,10 @@ Info required in `creds.json`:
 */
 
 var features = providers.DocumentationNotes{
+	// The default for unlisted capabilities is 'Cannot'.
+	// See providers/capabilities.go for the entire list of capabilities.
 	providers.CanGetZones:            providers.Can(),
+	providers.CanConcur:              providers.Cannot(),
 	providers.CanUseAlias:            providers.Can(),
 	providers.CanUseCAA:              providers.Can(),
 	providers.CanUseLOC:              providers.Cannot(),
@@ -34,11 +36,14 @@ var features = providers.DocumentationNotes{
 }
 
 func init() {
+	const providerName = "LUADNS"
+	const providerMaintainer = "@riku22"
 	fns := providers.DspFuncs{
 		Initializer:   NewLuaDNS,
 		RecordAuditor: AuditRecords,
 	}
-	providers.RegisterDomainServiceProviderType("LUADNS", fns, features)
+	providers.RegisterDomainServiceProviderType(providerName, fns, features)
+	providers.RegisterMaintainer(providerName, providerMaintainer)
 }
 
 // NewLuaDNS creates the provider.
@@ -95,46 +100,21 @@ func (l *luadnsProvider) GetZoneRecords(domain string, meta map[string]string) (
 }
 
 // GetZoneRecordsCorrections returns a list of corrections that will turn existing records into dc.Records.
-func (l *luadnsProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, records models.Records) ([]*models.Correction, error) {
+func (l *luadnsProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, records models.Records) ([]*models.Correction, int, error) {
+	var corrections []*models.Correction
 
 	checkNS(dc)
 
 	domainID, err := l.getDomainID(dc.Name)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
-	var corrections []*models.Correction
 	var corrs []*models.Correction
-	if !diff2.EnableDiff2 {
-		differ := diff.New(dc)
-		_, create, del, mod, err := differ.IncrementalDiff(records)
-		if err != nil {
-			return nil, err
-		}
 
-		corrections := []*models.Correction{}
-		for _, d := range del {
-			corrs := l.makeDeleteCorrection(d.Existing, domainID, d.String())
-			corrections = append(corrections, corrs...)
-		}
-
-		for _, d := range create {
-			corrs := l.makeCreateCorrection(d.Desired, domainID, d.String())
-			corrections = append(corrections, corrs...)
-		}
-
-		for _, d := range mod {
-			corrs := l.makeChangeCorrection(d.Existing, d.Desired, domainID, d.String())
-			corrections = append(corrections, corrs...)
-		}
-
-		return corrections, nil
-	}
-
-	changes, err := diff2.ByRecord(records, dc, nil)
+	changes, actualChangeCount, err := diff2.ByRecord(records, dc, nil)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	for _, change := range changes {
@@ -153,7 +133,7 @@ func (l *luadnsProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, reco
 		}
 		corrections = append(corrections, corrs...)
 	}
-	return corrections, nil
+	return corrections, actualChangeCount, nil
 }
 
 func (l *luadnsProvider) makeCreateCorrection(newrec *models.RecordConfig, domainID uint32, msg string) []*models.Correction {

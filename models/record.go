@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"sort"
 	"strings"
 
+	"github.com/StackExchange/dnscontrol/v4/pkg/txtutil"
 	"github.com/jinzhu/copier"
 	"github.com/miekg/dns"
 	"github.com/miekg/dns/dnsutil"
@@ -22,6 +22,7 @@ import (
 //	  ANAME  // Technically not an official rtype yet.
 //	  CAA
 //	  CNAME
+//	  HTTPS
 //	  LOC
 //	  MX
 //	  NAPTR
@@ -30,6 +31,7 @@ import (
 //	  SOA
 //	  SRV
 //	  SSHFP
+//	  SVCB
 //	  TLSA
 //	  TXT
 //	Pseudo-Types: (alphabetical)
@@ -37,6 +39,7 @@ import (
 //	  CF_REDIRECT
 //	  CF_TEMP_REDIRECT
 //	  CF_WORKER_ROUTE
+//	  CLOUDFLAREAPI_SINGLE_REDIRECT
 //	  CLOUDNS_WR
 //	  FRAME
 //	  IMPORT_TRANSFORM
@@ -44,10 +47,13 @@ import (
 //	  NO_PURGE
 //	  NS1_URLFWD
 //	  PAGE_RULE
+//	  PORKBUN_URLFWD
 //	  PURGE
 //	  URL
 //	  URL301
 //	  WORKER_ROUTE
+//
+// NOTE: All NEW record types should be prefixed with the provider name (Correct: CLOUDFLAREAPI_SINGLE_REDIRECT. Wrong: CF_REDIRECT)
 //
 // Notes about the fields:
 //
@@ -86,14 +92,14 @@ import (
 type RecordConfig struct {
 	Type      string            `json:"type"` // All caps rtype name.
 	Name      string            `json:"name"` // The short name. See above.
+	NameFQDN  string            `json:"-"`    // Must end with ".$origin". See above.
 	SubDomain string            `json:"subdomain,omitempty"`
-	NameFQDN  string            `json:"-"` // Must end with ".$origin". See above.
 	target    string            // If a name, must end with "."
 	TTL       uint32            `json:"ttl,omitempty"`
 	Metadata  map[string]string `json:"meta,omitempty"`
 	Original  interface{}       `json:"-"` // Store pointer to provider-specific record object. Used in diffing.
 
-	// If you add a field to this struct, also add it to the list on MarshalJSON.
+	// If you add a field to this struct, also add it to the list in the UnmarshalJSON function.
 	MxPreference     uint16            `json:"mxpreference,omitempty"`
 	SrvPriority      uint16            `json:"srvpriority,omitempty"`
 	SrvWeight        uint16            `json:"srvweight,omitempty"`
@@ -104,6 +110,10 @@ type RecordConfig struct {
 	DsAlgorithm      uint8             `json:"dsalgorithm,omitempty"`
 	DsDigestType     uint8             `json:"dsdigesttype,omitempty"`
 	DsDigest         string            `json:"dsdigest,omitempty"`
+	DnskeyFlags      uint16            `json:"dnskeyflags,omitempty"`
+	DnskeyProtocol   uint8             `json:"dnskeyprotocol,omitempty"`
+	DnskeyAlgorithm  uint8             `json:"dnskeyalgorithm,omitempty"`
+	DnskeyPublicKey  string            `json:"dnskeypublickey,omitempty"`
 	LocVersion       uint8             `json:"locversion,omitempty"`
 	LocSize          uint8             `json:"locsize,omitempty"`
 	LocHorizPre      uint8             `json:"lochorizpre,omitempty"`
@@ -124,12 +134,39 @@ type RecordConfig struct {
 	SoaRetry         uint32            `json:"soaretry,omitempty"`
 	SoaExpire        uint32            `json:"soaexpire,omitempty"`
 	SoaMinttl        uint32            `json:"soaminttl,omitempty"`
+	SvcPriority      uint16            `json:"svcpriority,omitempty"`
+	SvcParams        string            `json:"svcparams,omitempty"`
 	TlsaUsage        uint8             `json:"tlsausage,omitempty"`
 	TlsaSelector     uint8             `json:"tlsaselector,omitempty"`
 	TlsaMatchingType uint8             `json:"tlsamatchingtype,omitempty"`
-	TxtStrings       []string          `json:"txtstrings,omitempty"` // TxtStrings stores all strings (including the first). Target stores all the strings joined.
 	R53Alias         map[string]string `json:"r53_alias,omitempty"`
 	AzureAlias       map[string]string `json:"azure_alias,omitempty"`
+	UnknownTypeName  string            `json:"unknown_type_name,omitempty"`
+
+	// Cloudflare-specific fields:
+	// When these are used, .target is set to a human-readable version (only to be used for display purposes).
+	CloudflareRedirect *CloudflareSingleRedirectConfig `json:"cloudflareapi_redirect,omitempty"`
+}
+
+// CloudflareSingleRedirectConfig contains info about a Cloudflare Single Redirect.
+//
+//	When these are used, .target is set to a human-readable version (only to be used for display purposes).
+type CloudflareSingleRedirectConfig struct {
+	//
+	Code uint16 `json:"code,omitempty"` // 301 or 302
+	// PR == PageRule
+	PRWhen     string `json:"pr_when,omitempty"`
+	PRThen     string `json:"pr_then,omitempty"`
+	PRPriority int    `json:"pr_priority,omitempty"` // Really an identifier for the rule.
+	PRDisplay  string `json:"pr_display,omitempty"`  // How is this displayed to the user (SetTarget) for CF_REDIRECT/CF_TEMP_REDIRECT
+	//
+	// SR == SingleRedirect
+	SRName           string `json:"sr_name,omitempty"` // How is this displayed to the user
+	SRWhen           string `json:"sr_when,omitempty"`
+	SRThen           string `json:"sr_then,omitempty"`
+	SRRRulesetID     string `json:"sr_rulesetid,omitempty"`
+	SRRRulesetRuleID string `json:"sr_rulesetruleid,omitempty"`
+	SRDisplay        string `json:"sr_display,omitempty"` // How is this displayed to the user (SetTarget) for CF_SINGLE_REDIRECT
 }
 
 // MarshalJSON marshals RecordConfig.
@@ -161,6 +198,7 @@ func (rc *RecordConfig) UnmarshalJSON(b []byte) error {
 		TTL       uint32            `json:"ttl,omitempty"`
 		Metadata  map[string]string `json:"meta,omitempty"`
 		Original  interface{}       `json:"-"` // Store pointer to provider-specific record object. Used in diffing.
+		Args      []any             `json:"args,omitempty"`
 
 		MxPreference     uint16            `json:"mxpreference,omitempty"`
 		SrvPriority      uint16            `json:"srvpriority,omitempty"`
@@ -172,6 +210,10 @@ func (rc *RecordConfig) UnmarshalJSON(b []byte) error {
 		DsAlgorithm      uint8             `json:"dsalgorithm,omitempty"`
 		DsDigestType     uint8             `json:"dsdigesttype,omitempty"`
 		DsDigest         string            `json:"dsdigest,omitempty"`
+		DnskeyFlags      uint16            `json:"dnskeyflags,omitempty"`
+		DnskeyProtocol   uint8             `json:"dnskeyprotocol,omitempty"`
+		DnskeyAlgorithm  uint8             `json:"dnskeyalgorithm,omitempty"`
+		DnskeyPublicKey  string            `json:"dnskeypublickey,omitempty"`
 		LocVersion       uint8             `json:"locversion,omitempty"`
 		LocSize          uint8             `json:"locsize,omitempty"`
 		LocHorizPre      uint8             `json:"lochorizpre,omitempty"`
@@ -192,12 +234,14 @@ func (rc *RecordConfig) UnmarshalJSON(b []byte) error {
 		SoaRetry         uint32            `json:"soaretry,omitempty"`
 		SoaExpire        uint32            `json:"soaexpire,omitempty"`
 		SoaMinttl        uint32            `json:"soaminttl,omitempty"`
+		SvcPriority      uint16            `json:"svcpriority,omitempty"`
+		SvcParams        string            `json:"svcparams,omitempty"`
 		TlsaUsage        uint8             `json:"tlsausage,omitempty"`
 		TlsaSelector     uint8             `json:"tlsaselector,omitempty"`
 		TlsaMatchingType uint8             `json:"tlsamatchingtype,omitempty"`
-		TxtStrings       []string          `json:"txtstrings,omitempty"` // TxtStrings stores all strings (including the first). Target stores only the first one.
 		R53Alias         map[string]string `json:"r53_alias,omitempty"`
 		AzureAlias       map[string]string `json:"azure_alias,omitempty"`
+		UnknownTypeName  string            `json:"unknown_type_name,omitempty"`
 
 		EnsureAbsent bool `json:"ensure_absent,omitempty"` // Override NO_PURGE and delete this record
 
@@ -269,14 +313,6 @@ func (rc *RecordConfig) SetLabel(short, origin string) {
 	}
 }
 
-// UnsafeSetLabelNull sets the label to "". Normally the FQDN is denoted by .Name being
-// "@" however this can be used to violate that assertion. It should only be used
-// on copies of a RecordConfig that is being used for non-standard things like
-// Marshalling yaml.
-func (rc *RecordConfig) UnsafeSetLabelNull() {
-	rc.Name = ""
-}
-
 // SetLabelFromFQDN sets the .Name/.NameFQDN fields given a FQDN and origin.
 // fqdn may have a trailing "." but it is not required.
 // origin may not have a trailing dot.
@@ -313,47 +349,24 @@ func (rc *RecordConfig) GetLabelFQDN() string {
 	return rc.NameFQDN
 }
 
-// ToDiffable returns a string that is comparable by a differ.
-// extraMaps: a list of maps that should be included in the comparison.
-// NB(tlim): This will be deprecated when pkg/diff is replaced by pkg/diff2.
-// Use // ToComparableNoTTL() instead.
-func (rc *RecordConfig) ToDiffable(extraMaps ...map[string]string) string {
-	var content string
-	switch rc.Type {
-	case "SOA":
-		content = fmt.Sprintf("%s %v %d %d %d %d ttl=%d", rc.target, rc.SoaMbox, rc.SoaRefresh, rc.SoaRetry, rc.SoaExpire, rc.SoaMinttl, rc.TTL)
-		// SoaSerial is not used in comparison
-	default:
-		content = fmt.Sprintf("%v ttl=%d", rc.GetTargetCombined(), rc.TTL)
-	}
-	for _, valueMap := range extraMaps {
-		// sort the extra values map keys to perform a deterministic
-		// comparison since Golang maps iteration order is not guaranteed
-
-		// FIXME(tlim) The keys of each map is sorted per-map, not across
-		// all maps. This may be intentional since we'd have no way to
-		// deal with duplicates.
-
-		keys := make([]string, 0)
-		for k := range valueMap {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			v := valueMap[k]
-			content += fmt.Sprintf(" %s=%s", k, v)
-		}
-	}
-	return content
-}
-
 // ToComparableNoTTL returns a comparison string. If you need to compare two
 // RecordConfigs, you can simply compare the string returned by this function.
 // The comparison includes all fields except TTL and any provider-specific
 // metafields.  Provider-specific metafields like CF_PROXY are not the same as
 // pseudo-records like ANAME or R53_ALIAS
-// This replaces ToDiff()
 func (rc *RecordConfig) ToComparableNoTTL() string {
+	switch rc.Type {
+	case "SOA":
+		return fmt.Sprintf("%s %v %d %d %d %d", rc.target, rc.SoaMbox, rc.SoaRefresh, rc.SoaRetry, rc.SoaExpire, rc.SoaMinttl)
+		// SoaSerial is not included because it isn't used in comparisons.
+	case "TXT":
+		//fmt.Fprintf(os.Stdout, "DEBUG: ToComNoTTL raw txts=%s q=%q\n", rc.target, rc.target)
+		r := txtutil.EncodeQuoted(rc.target)
+		//fmt.Fprintf(os.Stdout, "DEBUG: ToComNoTTL cmp txts=%s q=%q\n", r, r)
+		return r
+	case "UNKNOWN":
+		return fmt.Sprintf("rtype=%s rdata=%s", rc.UnknownTypeName, rc.target)
+	}
 	return rc.GetTargetCombined()
 }
 
@@ -390,13 +403,25 @@ func (rc *RecordConfig) ToRR() dns.RR {
 		rr.(*dns.CAA).Value = rc.GetTargetField()
 	case dns.TypeCNAME:
 		rr.(*dns.CNAME).Target = rc.GetTargetField()
+	case dns.TypeDHCID:
+		rr.(*dns.DHCID).Digest = rc.GetTargetField()
+	case dns.TypeDNAME:
+		rr.(*dns.DNAME).Target = rc.GetTargetField()
 	case dns.TypeDS:
 		rr.(*dns.DS).Algorithm = rc.DsAlgorithm
 		rr.(*dns.DS).DigestType = rc.DsDigestType
 		rr.(*dns.DS).Digest = rc.DsDigest
 		rr.(*dns.DS).KeyTag = rc.DsKeyTag
+	case dns.TypeDNSKEY:
+		rr.(*dns.DNSKEY).Flags = rc.DnskeyFlags
+		rr.(*dns.DNSKEY).Protocol = rc.DnskeyProtocol
+		rr.(*dns.DNSKEY).Algorithm = rc.DnskeyAlgorithm
+		rr.(*dns.DNSKEY).PublicKey = rc.DnskeyPublicKey
+	case dns.TypeHTTPS:
+		rr.(*dns.HTTPS).Priority = rc.SvcPriority
+		rr.(*dns.HTTPS).Target = rc.GetTargetField()
+		rr.(*dns.HTTPS).Value = rc.GetSVCBValue()
 	case dns.TypeLOC:
-		//this is for records from .js files and read from API
 		// fmt.Printf("ToRR long: %d, lat:%d, sz: %d, hz:%d, vt:%d\n", rc.LocLongitude, rc.LocLatitude, rc.LocSize, rc.LocHorizPre, rc.LocVertPre)
 		// fmt.Printf("ToRR rc: %+v\n", *rc)
 		rr.(*dns.LOC).Version = rc.LocVersion
@@ -429,7 +454,7 @@ func (rc *RecordConfig) ToRR() dns.RR {
 		rr.(*dns.SOA).Expire = rc.SoaExpire
 		rr.(*dns.SOA).Minttl = rc.SoaMinttl
 	case dns.TypeSPF:
-		rr.(*dns.SPF).Txt = rc.TxtStrings
+		rr.(*dns.SPF).Txt = rc.GetTargetTXTSegmented()
 	case dns.TypeSRV:
 		rr.(*dns.SRV).Priority = rc.SrvPriority
 		rr.(*dns.SRV).Weight = rc.SrvWeight
@@ -439,13 +464,17 @@ func (rc *RecordConfig) ToRR() dns.RR {
 		rr.(*dns.SSHFP).Algorithm = rc.SshfpAlgorithm
 		rr.(*dns.SSHFP).Type = rc.SshfpFingerprint
 		rr.(*dns.SSHFP).FingerPrint = rc.GetTargetField()
+	case dns.TypeSVCB:
+		rr.(*dns.SVCB).Priority = rc.SvcPriority
+		rr.(*dns.SVCB).Target = rc.GetTargetField()
+		rr.(*dns.SVCB).Value = rc.GetSVCBValue()
 	case dns.TypeTLSA:
 		rr.(*dns.TLSA).Usage = rc.TlsaUsage
 		rr.(*dns.TLSA).MatchingType = rc.TlsaMatchingType
 		rr.(*dns.TLSA).Selector = rc.TlsaSelector
 		rr.(*dns.TLSA).Certificate = rc.GetTargetField()
 	case dns.TypeTXT:
-		rr.(*dns.TXT).Txt = rc.TxtStrings
+		rr.(*dns.TXT).Txt = rc.GetTargetTXTSegmented()
 	default:
 		panic(fmt.Sprintf("ToRR: Unimplemented rtype %v", rc.Type))
 		// We panic so that we quickly find any switch statements
@@ -453,6 +482,20 @@ func (rc *RecordConfig) ToRR() dns.RR {
 	}
 
 	return rr
+}
+
+// GetDependencies returns the FQDNs on which this record dependents
+func (rc *RecordConfig) GetDependencies() []string {
+
+	switch rc.Type {
+	// #rtype_variations
+	case "NS", "SRV", "CNAME", "DNAME", "MX", "ALIAS", "AZURE_ALIAS", "R53_ALIAS":
+		return []string{
+			rc.target,
+		}
+	}
+
+	return []string{}
 }
 
 // RecordKey represents a resource record in a format used by some systems.
@@ -484,6 +527,21 @@ func (rc *RecordConfig) Key() RecordKey {
 	return RecordKey{rc.NameFQDN, t}
 }
 
+// GetSVCBValue returns the SVCB Key/Values as a list of Key/Values.
+func (rc *RecordConfig) GetSVCBValue() []dns.SVCBKeyValue {
+	record, err := dns.NewRR(fmt.Sprintf("%s %s %d %s %s", rc.NameFQDN, rc.Type, rc.SvcPriority, rc.target, rc.SvcParams))
+	if err != nil {
+		log.Fatalf("could not parse SVCB record: %s", err)
+	}
+	switch r := record.(type) {
+	case *dns.HTTPS:
+		return r.Value
+	case *dns.SVCB:
+		return r.Value
+	}
+	return nil
+}
+
 // Records is a list of *RecordConfig.
 type Records []*RecordConfig
 
@@ -495,16 +553,6 @@ func (recs Records) HasRecordTypeName(rtype, name string) bool {
 		}
 	}
 	return false
-}
-
-// FQDNMap returns a map of all LabelFQDNs. Useful for making a
-// truthtable of labels that exist in Records.
-func (recs Records) FQDNMap() (m map[string]bool) {
-	m = map[string]bool{}
-	for _, rec := range recs {
-		m[rec.GetLabelFQDN()] = true
-	}
-	return m
 }
 
 // GetByType returns the records that match rtype typeName.
@@ -527,19 +575,6 @@ func (recs Records) GroupedByKey() map[RecordKey]Records {
 	return groups
 }
 
-// GroupedByLabel returns a map of keys to records, and their original key order.
-func (recs Records) GroupedByLabel() ([]string, map[string]Records) {
-	order := []string{}
-	groups := map[string]Records{}
-	for _, rec := range recs {
-		if _, found := groups[rec.Name]; !found {
-			order = append(order, rec.Name)
-		}
-		groups[rec.Name] = append(groups[rec.Name], rec)
-	}
-	return order, groups
-}
-
 // GroupedByFQDN returns a map of keys to records, grouped by FQDN.
 func (recs Records) GroupedByFQDN() ([]string, map[string]Records) {
 	order := []string{}
@@ -554,6 +589,16 @@ func (recs Records) GroupedByFQDN() ([]string, map[string]Records) {
 	return order, groups
 }
 
+// GetAllDependencies concatinates all dependencies of all records
+func (recs Records) GetAllDependencies() []string {
+	var dependencies []string
+	for _, rec := range recs {
+		dependencies = append(dependencies, rec.GetDependencies()...)
+	}
+
+	return dependencies
+}
+
 // PostProcessRecords does any post-processing of the downloaded DNS records.
 // Deprecated. zonerecords.CorrectZoneRecords() calls Downcase directly.
 func PostProcessRecords(recs []*RecordConfig) {
@@ -566,20 +611,42 @@ func Downcase(recs []*RecordConfig) {
 		r.Name = strings.ToLower(r.Name)
 		r.NameFQDN = strings.ToLower(r.NameFQDN)
 		switch r.Type { // #rtype_variations
-		case "ANAME", "CNAME", "DS", "MX", "NS", "PTR", "NAPTR", "SRV", "TLSA", "AKAMAICDN":
-			// These record types have a target that is case insensitive, so we downcase it.
+		case "AKAMAICDN", "ALIAS", "AAAA", "ANAME", "CNAME", "DNAME", "DS", "DNSKEY", "MX", "NS", "NAPTR", "PTR", "SRV", "TLSA":
+			// Target is case insensitive. Downcase it.
 			r.target = strings.ToLower(r.target)
-		case "LOC":
-			// Do nothing to affect case of letters.
-		case "A", "AAAA", "ALIAS", "CAA", "IMPORT_TRANSFORM", "TXT", "SSHFP", "CF_REDIRECT", "CF_TEMP_REDIRECT", "CF_WORKER_ROUTE":
-			// These record types have a target that is case sensitive, or is an IP address. We leave them alone.
-			// Do nothing.
+			// BUGFIX(tlim): isn't ALIAS in the wrong case statement?
+		case "A", "CAA", "CLOUDFLAREAPI_SINGLE_REDIRECT", "CF_REDIRECT", "CF_TEMP_REDIRECT", "CF_WORKER_ROUTE", "DHCID", "IMPORT_TRANSFORM", "LOC", "SSHFP", "TXT":
+			// Do nothing. (IP address or case sensitive target)
 		case "SOA":
 			if r.target != "DEFAULT_NOT_SET." {
 				r.target = strings.ToLower(r.target) // .target stores the Ns
 			}
 			if r.SoaMbox != "DEFAULT_NOT_SET." {
 				r.SoaMbox = strings.ToLower(r.SoaMbox)
+			}
+		default:
+			// TODO: we'd like to panic here, but custom record types complicate things.
+		}
+	}
+}
+
+// CanonicalizeTargets turns Targets into FQDNs
+func CanonicalizeTargets(recs []*RecordConfig, origin string) {
+	originFQDN := origin + "."
+
+	for _, r := range recs {
+		switch r.Type { // #rtype_variations
+		case "ALIAS", "ANAME", "CNAME", "DNAME", "DS", "DNSKEY", "MX", "NS", "NAPTR", "PTR", "SRV":
+			// Target is a hostname that might be a shortname. Turn it into a FQDN.
+			r.target = dnsutil.AddOrigin(r.target, originFQDN)
+		case "A", "AKAMAICDN", "CAA", "DHCID", "CLOUDFLAREAPI_SINGLE_REDIRECT", "CF_REDIRECT", "CF_TEMP_REDIRECT", "CF_WORKER_ROUTE", "HTTPS", "IMPORT_TRANSFORM", "LOC", "SSHFP", "SVCB", "TLSA", "TXT":
+			// Do nothing.
+		case "SOA":
+			if r.target != "DEFAULT_NOT_SET." {
+				r.target = dnsutil.AddOrigin(r.target, originFQDN) // .target stores the Ns
+			}
+			if r.SoaMbox != "DEFAULT_NOT_SET." {
+				r.SoaMbox = dnsutil.AddOrigin(r.SoaMbox, originFQDN)
 			}
 		default:
 			// TODO: we'd like to panic here, but custom record types complicate things.

@@ -8,7 +8,6 @@ import (
 
 	"github.com/StackExchange/dnscontrol/v4/models"
 	"github.com/StackExchange/dnscontrol/v4/pkg/diff"
-	"github.com/StackExchange/dnscontrol/v4/pkg/diff2"
 	"github.com/StackExchange/dnscontrol/v4/pkg/printer"
 	"github.com/StackExchange/dnscontrol/v4/providers"
 	"github.com/softlayer/softlayer-go/datatypes"
@@ -23,17 +22,23 @@ type softlayerProvider struct {
 }
 
 var features = providers.DocumentationNotes{
+	// The default for unlisted capabilities is 'Cannot'.
+	// See providers/capabilities.go for the entire list of capabilities.
 	providers.CanGetZones: providers.Unimplemented(),
+	providers.CanConcur:   providers.Cannot(),
 	providers.CanUseLOC:   providers.Cannot(),
 	providers.CanUseSRV:   providers.Can(),
 }
 
 func init() {
+	const providerName = "SOFTLAYER"
+	const providerMaintainer = "NEEDS VOLUNTEER"
 	fns := providers.DspFuncs{
 		Initializer:   newReg,
 		RecordAuditor: AuditRecords,
 	}
-	providers.RegisterDomainServiceProviderType("SOFTLAYER", fns, features)
+	providers.RegisterDomainServiceProviderType(providerName, fns, features)
+	providers.RegisterMaintainer(providerName, providerMaintainer)
 }
 
 func newReg(conf map[string]string, _ json.RawMessage) (providers.DNSServiceProvider, error) {
@@ -76,22 +81,18 @@ func (s *softlayerProvider) GetZoneRecords(domainName string, meta map[string]st
 }
 
 // GetZoneRecordsCorrections returns a list of corrections that will turn existing records into dc.Records.
-func (s *softlayerProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, actual models.Records) ([]*models.Correction, error) {
+func (s *softlayerProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, actual models.Records) ([]*models.Correction, int, error) {
 	domain, err := s.getDomain(&dc.Name)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
-	var corrections []*models.Correction
-	var create, deletes, modify diff.Changeset
-	if !diff2.EnableDiff2 {
-		_, create, deletes, modify, err = diff.New(dc).IncrementalDiff(actual)
-	} else {
-		_, create, deletes, modify, err = diff.NewCompat(dc).IncrementalDiff(actual)
-	}
+	toReport, create, deletes, modify, actualChangeCount, err := diff.NewCompat(dc).IncrementalDiff(actual)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
+	// Start corrections with the reports
+	corrections := diff.GenerateMessageCorrections(toReport)
 
 	for _, del := range deletes {
 		existing := del.Existing.Original.(datatypes.Dns_Domain_ResourceRecord)
@@ -116,7 +117,7 @@ func (s *softlayerProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, a
 		})
 	}
 
-	return corrections, nil
+	return corrections, actualChangeCount, nil
 }
 
 func (s *softlayerProvider) getDomain(name *string) (*datatypes.Dns_Domain, error) {
@@ -178,7 +179,10 @@ func (s *softlayerProvider) getExistingRecords(domain *datatypes.Dns_Domain) (mo
 			}
 			recConfig.SetLabel(fmt.Sprintf("%s.%s", service, strings.ToLower(protocol)), *domain.Name)
 		case "TXT":
-			recConfig.TxtStrings = append(recConfig.TxtStrings, *record.Data)
+			// OLD: recConfig.TxtStrings = append(recConfig.TxtStrings, *record.Data)
+			recConfig.SetTargetTXTs(append(recConfig.GetTargetTXTSegmented(), *record.Data))
+			// NB(tlim) The above code seems too complex.  Can it be simplied to this?
+			// recConfig.SetTargetTXT(*record.Data)
 			fallthrough
 		case "MX":
 			if record.MxPriority != nil {

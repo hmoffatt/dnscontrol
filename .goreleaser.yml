@@ -1,3 +1,6 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+project_name: dnscontrol
+version: 2
 builds:
   -
     id: build
@@ -9,11 +12,22 @@ builds:
       - windows
       - darwin
       - freebsd
+# List of combinations of GOOS + GOARCH + GOARM to ignore.
+    ignore:
+      - goos: linux
+        goarch: "386"
+      - goos: windows
+        goarch: "386"
+      - goos: freebsd
+        goarch: "386"
     ldflags:
-      - -linkmode=internal -s -w -X main.Version="{{ .Version }}" -X main.SHA="{{ .FullCommit }}" -X main.BuildTime={{ .Timestamp }}
+      - -linkmode=internal -s -w
+      - -X main.version={{ .Version }}
 before:
   hooks:
-  - go mod tidy
+    - go fmt ./...
+    - go mod tidy
+    - go generate ./...
 changelog:
   sort: asc
   use: github
@@ -25,13 +39,22 @@ changelog:
       regexp: "(?i)^.*(major|new provider|feature)[(\\w)]*:+.*$"
       order: 1
     - title: 'Provider-specific changes:'
-      regexp: "(?i)((akamaiedge|autodns|axfrd|azure|bind|cloudflare|cloudflareapi_old|cloudns|cscglobal|desec|digitalocean|dnsimple|dnsmadeeasy|doh|domainnameshop|easyname|exoscale|gandi|gcloud|gcore|hedns|hetzner|hexonet|hostingde|inwx|linode|loopia|luadns|msdns|namecheap|namedotcom|netcup|netlify|ns1|opensrs|oracle|ovh|packetframe|porkbun|powerdns|route53|rwth|softlayer|transip|vultr).*:)+.*"
+      regexp: "(?i)((akamaiedge|autodns|axfrd|azure|azure_private_dns|bind|bunnydns|cloudflare|cloudflareapi_old|cloudns|cnr|cscglobal|desec|digitalocean|dnsimple|dnsmadeeasy|doh|domainnameshop|dynadot|easyname|exoscale|gandi|gcloud|gcore|hedns|hetzner|hexonet|hostingde|huaweicloud|inwx|linode|loopia|luadns|msdns|mythicbeasts|namecheap|namedotcom|netcup|netlify|ns1|opensrs|oracle|ovh|packetframe|porkbun|powerdns|realtimeregister|route53|rwth|sakuracloud|softlayer|transip|vultr).*:)+.*"
       order: 2
+    - title: 'Documentation:'
+      regexp: "(?i)^.*(docs)[(\\w)]*:+.*$"
+      order: 3
+    - title: 'CI/CD:'
+      regexp: "(?i)^.*(build|ci|cicd)[(\\w)]*:+.*$"
+      order: 4
+    - title: 'Dependencies:'
+      regexp: "(?i)^.*Build\\(deps\\)*:+.*$|(?i)^.*update deps+.*$"
+      order: 5
+    - title: 'Other changes and improvements:'
+      order: 9
     - title: 'Deprecation warnings:'
       regexp: "(?i)^.*Deprecate[(\\w)]*:+.*$"
       order: 10
-    - title: 'Other changes and improvements:'
-      order: 9
   filters:
     exclude:
     - '^test:'
@@ -47,30 +70,35 @@ universal_binaries:
     id: build
 
 nfpms:
-  - file_name_template: '{{ .ProjectName }}-{{ .Version }}.{{ .Arch }}'
-    id: packages_rpm
+  - id: packages_rpm
+    file_name_template: >-
+      {{ .ProjectName }}-
+      {{- .Version }}.
+      {{- if eq .Arch "386" }}i386
+      {{- else if eq .Arch "amd64" }}x86_64
+      {{- else }}{{ .Arch }}{{ end }}
     homepage:  https://docs.dnscontrol.org/
     description: "DNSControl: Infrastructure as Code for DNS Zones"
     maintainer: 'Tom Limoncelli <tlimoncelli@stackoverflow.com>'
     license: MIT
     formats:
     - rpm
-    replacements:
-      386: i386
-      amd64: x86_64
-  - file_name_template: '{{ .ProjectName }}-{{ .Version }}.{{ .Arch }}'
-    id: packages_deb
+  - id: packages_deb
+    file_name_template: >-
+      {{ .ProjectName }}-
+      {{- .Version }}.
+      {{- if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
     homepage:  https://docs.dnscontrol.org/
     description: "DNSControl: Infrastructure as Code for DNS Zones"
     maintainer: 'Tom Limoncelli <tlimoncelli@stackoverflow.com>'
     license: MIT
     formats:
     - deb
-    replacements:
-      386: i386
 dockers:
   - image_templates:
     - &amd_image "stackexchange/{{.ProjectName}}:{{ .Version }}-amd64"
+    - &amd_image_ghcr "ghcr.io/stackexchange/{{.ProjectName}}:{{ .Version }}-amd64"
     goos: linux
     goarch: amd64
     use: buildx
@@ -78,29 +106,15 @@ dockers:
     - build
     build_flag_templates:
     - "--pull"
-    - "--label=org.opencontainers.image.created={{ .Date }}"
-    - "--label=org.opencontainers.image.name={{ .ProjectName }}"
-    - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
-    - "--label=org.opencontainers.image.version={{ .Version }}"
-    - "--label=org.opencontainers.image.source={{ .GitURL }}"
     - "--platform=linux/amd64"
-  - image_templates:
-    - &386_image "stackexchange/{{.ProjectName}}:{{ .Version }}-386"
-    goos: linux
-    goarch: '386'
-    use: buildx
-    ids:
-    - build
-    build_flag_templates:
-    - "--pull"
     - "--label=org.opencontainers.image.created={{ .Date }}"
     - "--label=org.opencontainers.image.name={{ .ProjectName }}"
     - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
     - "--label=org.opencontainers.image.version={{ .Version }}"
     - "--label=org.opencontainers.image.source={{ .GitURL }}"
-    - "--platform=linux/i386"
   - image_templates:
     - &arm_image "stackexchange/{{.ProjectName}}:{{ .Version }}-arm64"
+    - &arm_image_ghcr "ghcr.io/stackexchange/{{.ProjectName}}:{{ .Version }}-arm64"
     goos: linux
     goarch: arm64
     use: buildx
@@ -108,30 +122,85 @@ dockers:
     - build
     build_flag_templates:
     - "--pull"
+    - "--platform=linux/arm64"
     - "--label=org.opencontainers.image.created={{ .Date }}"
     - "--label=org.opencontainers.image.name={{ .ProjectName }}"
     - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
     - "--label=org.opencontainers.image.version={{ .Version }}"
     - "--label=org.opencontainers.image.source={{ .GitURL }}"
-    - "--platform=linux/arm64"
 docker_manifests:
   - name_template: "stackexchange/{{.ProjectName}}:{{ .Version }}"
     image_templates:
       - *amd_image
-      - *386_image
       - *arm_image
+  - name_template: "ghcr.io/stackexchange/{{.ProjectName}}:{{ .Version }}"
+    image_templates:
+      - *amd_image_ghcr
+      - *arm_image_ghcr
   - name_template: "stackexchange/{{.ProjectName}}:latest"
     skip_push: auto
     image_templates:
       - *amd_image
-      - *386_image
       - *arm_image
+  - name_template: "ghcr.io/stackexchange/{{.ProjectName}}:latest"
+    skip_push: auto
+    image_templates:
+      - *amd_image_ghcr
+      - *arm_image_ghcr
 checksum:
   name_template: 'checksums.txt'
 snapshot:
-  name_template: "{{ incpatch .Version }}-next"
+  version_template: "{{ incpatch .Version }}-next"
 
 release:
   draft: true
   prerelease: auto
   mode: append
+  footer: |
+    ## Deprecation warnings
+
+    > [!WARNING]
+    > - **REV() will switch from RFC2317 to RFC4183 in v5.0.**  This is a breaking change. Warnings are output if your configuration is affected. No date has been announced for v5.0. See https://docs.dnscontrol.org/language-reference/top-level-functions/revcompat
+    > - **MSDNS maintainer needed!** Without a new volunteer, this DNS provider will lose support after April 2025. See https://github.com/StackExchange/dnscontrol/issues/2878
+    > - **NAMEDOTCOM and SOFTLAYER need maintainers!** These providers have no maintainer. Maintainers respond to PRs and fix bugs in a timely manner, and try to stay on top of protocol changes.
+    > - **get-certs/ACME support is frozen and will be removed without notice between now and July 2025.** It has been unsupported since December 2022.  If you don't use this feature, do not start. If you do use this feature, migrate ASAP.  See discussion in [issues/1400](https://github.com/StackExchange/dnscontrol/issues/1400)
+
+    ## Install
+
+    #### macOS and Linux
+
+    ##### Install with [Homebrew](https://brew.sh) (recommended)
+
+    ```shell
+    brew install dnscontrol
+    ```
+
+    ##### Using with [Docker](https://www.docker.com)
+
+    You can use the Docker image from [Docker hub](https://hub.docker.com/r/stackexchange/dnscontrol/) or [GitHub Container Registry](https://github.com/stackexchange/dnscontrol/pkgs/container/dnscontrol).
+
+    ```shell
+    docker run --rm -it -v "$(pwd):/dns" ghcr.io/stackexchange/dnscontrol preview
+    ```
+
+    #### Anywhere else
+
+    Alternatively, you can install the latest binary (or the apt/rpm/deb/archlinux package) from this page.
+
+    Or, if you have Go installed, you can install the latest version of DNSControl with the following command:
+
+    ```shell
+    go install github.com/StackExchange/dnscontrol/v4@main
+    ```
+
+    ## Update
+
+    Update to the latest version depends on how you choose to install `dnscontrol` on your machine.
+
+    #### Update with [Homebrew](https://brew.sh)
+
+    ```shell
+    brew upgrade dnscontrol
+    ```
+
+    Alternatively, you can grab the latest binary (or the apt/rpm/deb package) from this page.

@@ -6,11 +6,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
+	"strings"
 	"time"
+
+	"github.com/StackExchange/dnscontrol/v4/pkg/printer"
 )
 
 const (
-	baseURL = "https://porkbun.com/api/json/v3"
+	baseURL = "https://api.porkbun.com/api/json/v3"
 )
 
 type porkbunProvider struct {
@@ -18,7 +22,7 @@ type porkbunProvider struct {
 	secretKey string
 }
 
-type requestParams map[string]string
+type requestParams map[string]any
 
 type errorResponse struct {
 	Status  string `json:"status"`
@@ -32,12 +36,28 @@ type domainRecord struct {
 	Content string `json:"content"`
 	TTL     string `json:"ttl"`
 	Prio    string `json:"prio"`
-	Notes   string `json:"notes"`
+	// Forwarding
+	Subdomain   string `json:"subdomain"`
+	Location    string `json:"location"`
+	IncludePath string `json:"includePath"`
+	Wildcard    string `json:"wildcard"`
 }
 
 type recordResponse struct {
-	Status  string         `json:"status"`
-	Records []domainRecord `json:"records"`
+	Records  []domainRecord `json:"records"`
+	Forwards []domainRecord `json:"forwards"`
+}
+
+type domainListRecord struct {
+	Domain string `json:"domain"`
+}
+
+type domainListResponse struct {
+	Domains []domainListRecord `json:"domains"`
+}
+
+type nsResponse struct {
+	Nameservers []string `json:"ns"`
 }
 
 func (c *porkbunProvider) post(endpoint string, params requestParams) ([]byte, error) {
@@ -52,15 +72,28 @@ func (c *porkbunProvider) post(endpoint string, params requestParams) ([]byte, e
 	client := &http.Client{}
 	req, _ := http.NewRequest("POST", baseURL+endpoint, bytes.NewBuffer(personJSON))
 
+	retrycnt := 0
+
 	// If request sending too fast, the server will fail with the following error:
 	// porkbun API error: Create error: We were unable to create the DNS record.
-	time.Sleep(500 * time.Millisecond)
+retry:
+	time.Sleep(time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return []byte{}, err
 	}
 
 	bodyString, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode == 202 || resp.StatusCode == 503 {
+		retrycnt++
+		if retrycnt == 5 {
+			return bodyString, fmt.Errorf("rate limiting exceeded")
+		}
+		printer.Warnf("Rate limiting.. waiting for %d second(s)\n", retrycnt*10)
+		time.Sleep(time.Second * time.Duration(retrycnt*10))
+		goto retry
+	}
 
 	// Got error from API ?
 	var errResp errorResponse
@@ -74,15 +107,9 @@ func (c *porkbunProvider) post(endpoint string, params requestParams) ([]byte, e
 	return bodyString, nil
 }
 
-func (c *porkbunProvider) ping() error {
-	params := requestParams{}
-	_, err := c.post("/ping", params)
-	return err
-}
-
 func (c *porkbunProvider) createRecord(domain string, rec requestParams) error {
 	if _, err := c.post("/dns/create/"+domain, rec); err != nil {
-		return fmt.Errorf("failed create record (porkbun): %s", err)
+		return fmt.Errorf("failed create record (porkbun): %w", err)
 	}
 	return nil
 }
@@ -90,14 +117,14 @@ func (c *porkbunProvider) createRecord(domain string, rec requestParams) error {
 func (c *porkbunProvider) deleteRecord(domain string, recordID string) error {
 	params := requestParams{}
 	if _, err := c.post(fmt.Sprintf("/dns/delete/%s/%s", domain, recordID), params); err != nil {
-		return fmt.Errorf("failed delete record (porkbun): %s", err)
+		return fmt.Errorf("failed delete record (porkbun): %w", err)
 	}
 	return nil
 }
 
 func (c *porkbunProvider) modifyRecord(domain string, recordID string, rec requestParams) error {
 	if _, err := c.post(fmt.Sprintf("/dns/edit/%s/%s", domain, recordID), rec); err != nil {
-		return fmt.Errorf("failed update (porkbun): %s", err)
+		return fmt.Errorf("failed update (porkbun): %w", err)
 	}
 	return nil
 }
@@ -106,11 +133,14 @@ func (c *porkbunProvider) getRecords(domain string) ([]domainRecord, error) {
 	params := requestParams{}
 	var bodyString, err = c.post("/dns/retrieve/"+domain, params)
 	if err != nil {
-		return nil, fmt.Errorf("failed fetching record list from porkbun: %s", err)
+		return nil, fmt.Errorf("failed fetching record list from porkbun: %w", err)
 	}
 
 	var dr recordResponse
-	json.Unmarshal(bodyString, &dr)
+	err = json.Unmarshal(bodyString, &dr)
+	if err != nil {
+		return nil, fmt.Errorf("failed parsing record list from porkbun: %w", err)
+	}
 
 	var records []domainRecord
 	for _, rec := range dr.Records {
@@ -120,4 +150,100 @@ func (c *porkbunProvider) getRecords(domain string) ([]domainRecord, error) {
 		records = append(records, rec)
 	}
 	return records, nil
+}
+
+func (c *porkbunProvider) createURLForwardingRecord(domain string, rec requestParams) error {
+	if _, err := c.post("/domain/addUrlForward/"+domain, rec); err != nil {
+		return fmt.Errorf("failed create url forwarding record (porkbun): %w", err)
+	}
+	return nil
+}
+
+func (c *porkbunProvider) deleteURLForwardingRecord(domain string, recordID string) error {
+	params := requestParams{}
+	if _, err := c.post(fmt.Sprintf("/domain/deleteUrlForward/%s/%s", domain, recordID), params); err != nil {
+		return fmt.Errorf("failed delete url forwarding record (porkbun): %w", err)
+	}
+	return nil
+}
+
+func (c *porkbunProvider) modifyURLForwardingRecord(domain string, recordID string, rec requestParams) error {
+	if err := c.deleteURLForwardingRecord(domain, recordID); err != nil {
+		return err
+	}
+	if err := c.createURLForwardingRecord(domain, rec); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *porkbunProvider) getURLForwardingRecords(domain string) ([]domainRecord, error) {
+	params := requestParams{}
+	var bodyString, err = c.post("/domain/getUrlForwarding/"+domain, params)
+	if err != nil {
+		return nil, fmt.Errorf("failed fetching url forwarding record list from porkbun: %w", err)
+	}
+
+	var dr recordResponse
+	err = json.Unmarshal(bodyString, &dr)
+	if err != nil {
+		return nil, fmt.Errorf("failed parsing url forwarding record list from porkbun: %w", err)
+	}
+
+	return dr.Forwards, nil
+}
+
+func (c *porkbunProvider) getNameservers(domain string) ([]string, error) {
+	params := requestParams{}
+	var bodyString, err = c.post(fmt.Sprintf("/domain/getNs/%s", domain), params)
+	if err != nil {
+		return nil, fmt.Errorf("failed fetching nameserver list from porkbun: %w", err)
+	}
+
+	var ns nsResponse
+	err = json.Unmarshal(bodyString, &ns)
+	if err != nil {
+		return nil, fmt.Errorf("failed parsing nameserver list from porkbun: %w", err)
+	}
+
+	sort.Strings(ns.Nameservers)
+
+	var nameservers []string
+	for _, nameserver := range ns.Nameservers {
+		// Remove the trailing dot only if it exists.
+		// This provider seems to add the trailing dot to some domains but not others.
+		// The .DE domains seem to always include the dot, others don't.
+		nameservers = append(nameservers, strings.TrimSuffix(nameserver, "."))
+	}
+	return nameservers, nil
+}
+
+func (c *porkbunProvider) updateNameservers(ns []string, domain string) error {
+	params := requestParams{}
+	params["ns"] = ns
+	if _, err := c.post(fmt.Sprintf("/domain/updateNs/%s", domain), params); err != nil {
+		return fmt.Errorf("failed NS update (porkbun): %w", err)
+	}
+	return nil
+}
+
+func (c *porkbunProvider) listAllDomains() ([]string, error) {
+	params := requestParams{}
+	var bodyString, err = c.post("/domain/listAll", params)
+	if err != nil {
+		return nil, fmt.Errorf("failed listing all domains from porkbun: %w", err)
+	}
+
+	var dlr domainListResponse
+	err = json.Unmarshal(bodyString, &dlr)
+	if err != nil {
+		return nil, fmt.Errorf("failed parsing domain list from porkbun: %w", err)
+	}
+
+	var domains []string
+	for _, domain := range dlr.Domains {
+		domains = append(domains, domain.Domain)
+	}
+	sort.Strings(domains)
+	return domains, nil
 }

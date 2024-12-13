@@ -3,18 +3,26 @@ package porkbun
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/StackExchange/dnscontrol/v4/models"
-	"github.com/StackExchange/dnscontrol/v4/pkg/diff"
 	"github.com/StackExchange/dnscontrol/v4/pkg/diff2"
 	"github.com/StackExchange/dnscontrol/v4/pkg/printer"
 	"github.com/StackExchange/dnscontrol/v4/providers"
+
+	"github.com/miekg/dns/dnsutil"
 )
 
 const (
 	minimumTTL = 600
+)
+
+const (
+	metaType        = "type"
+	metaIncludePath = "includePath"
+	metaWildcard    = "wildcard"
 )
 
 // https://kb.porkbun.com/article/63-how-to-switch-to-porkbuns-nameservers
@@ -25,8 +33,16 @@ var defaultNS = []string{
 	"salvador.ns.porkbun.com",
 }
 
-// NewPorkbun creates the provider.
-func NewPorkbun(m map[string]string, metadata json.RawMessage) (providers.DNSServiceProvider, error) {
+func newReg(conf map[string]string) (providers.Registrar, error) {
+	return newPorkbun(conf, nil)
+}
+
+func newDsp(conf map[string]string, metadata json.RawMessage) (providers.DNSServiceProvider, error) {
+	return newPorkbun(conf, metadata)
+}
+
+// newPorkbun creates the provider.
+func newPorkbun(m map[string]string, _ json.RawMessage) (*porkbunProvider, error) {
 	c := &porkbunProvider{}
 
 	c.apiKey, c.secretKey = m["api_key"], m["secret_key"]
@@ -35,19 +51,17 @@ func NewPorkbun(m map[string]string, metadata json.RawMessage) (providers.DNSSer
 		return nil, fmt.Errorf("missing porkbun api_key or secret_key")
 	}
 
-	// Validate authentication
-	if err := c.ping(); err != nil {
-		return nil, err
-	}
-
 	return c, nil
 }
 
 var features = providers.DocumentationNotes{
+	// The default for unlisted capabilities is 'Cannot'.
+	// See providers/capabilities.go for the entire list of capabilities.
 	providers.CanAutoDNSSEC:          providers.Cannot(),
 	providers.CanGetZones:            providers.Can(),
+	providers.CanConcur:              providers.Cannot(),
 	providers.CanUseAlias:            providers.Can(),
-	providers.CanUseCAA:              providers.Unimplemented(), // CAA record for base domain is pinning to a fixed set once configure
+	providers.CanUseCAA:              providers.Can(),
 	providers.CanUseDS:               providers.Cannot(),
 	providers.CanUseDSForChildren:    providers.Cannot(),
 	providers.CanUseLOC:              providers.Cannot(),
@@ -63,11 +77,16 @@ var features = providers.DocumentationNotes{
 }
 
 func init() {
+	const providerName = "PORKBUN"
+	const providerMaintainer = "@imlonghao"
+	providers.RegisterRegistrarType(providerName, newReg)
 	fns := providers.DspFuncs{
-		Initializer:   NewPorkbun,
+		Initializer:   newDsp,
 		RecordAuditor: AuditRecords,
 	}
-	providers.RegisterDomainServiceProviderType("PORKBUN", fns, features)
+	providers.RegisterDomainServiceProviderType(providerName, fns, features)
+	providers.RegisterMaintainer(providerName, providerMaintainer)
+	providers.RegisterCustomRecordType("PORKBUN_URLFWD", providerName, "")
 }
 
 // GetNameservers returns the nameservers for a domain.
@@ -75,8 +94,16 @@ func (c *porkbunProvider) GetNameservers(domain string) ([]*models.Nameserver, e
 	return models.ToNameservers(defaultNS)
 }
 
+func genComparable(rec *models.RecordConfig) string {
+	if rec.Type == "PORKBUN_URLFWD" {
+		return fmt.Sprintf("type=%s includePath=%s wildcard=%s", rec.Metadata[metaType], rec.Metadata[metaIncludePath], rec.Metadata[metaWildcard])
+	}
+	return ""
+}
+
 // GetZoneRecordsCorrections returns a list of corrections that will turn existing records into dc.Records.
-func (c *porkbunProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, existingRecords models.Records) ([]*models.Correction, error) {
+func (c *porkbunProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, existingRecords models.Records) ([]*models.Correction, int, error) {
+	var corrections []*models.Correction
 
 	// Block changes to NS records for base domain
 	checkNSModifications(dc)
@@ -84,66 +111,26 @@ func (c *porkbunProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, exi
 	// Make sure TTL larger than the minimum TTL
 	for _, record := range dc.Records {
 		record.TTL = fixTTL(record.TTL)
+		if record.Type == "PORKBUN_URLFWD" {
+			record.TTL = 0
+			if record.Metadata == nil {
+				record.Metadata = make(map[string]string)
+			}
+			if record.Metadata[metaType] == "" {
+				record.Metadata[metaType] = "temporary"
+			}
+			if record.Metadata[metaIncludePath] == "" {
+				record.Metadata[metaIncludePath] = "no"
+			}
+			if record.Metadata[metaWildcard] == "" {
+				record.Metadata[metaWildcard] = "yes"
+			}
+		}
 	}
 
-	var corrections []*models.Correction
-	if !diff2.EnableDiff2 {
-
-		differ := diff.New(dc)
-		_, create, del, modify, err := differ.IncrementalDiff(existingRecords)
-		if err != nil {
-			return nil, err
-		}
-
-		// Deletes first so changing type works etc.
-		for _, m := range del {
-			id := m.Existing.Original.(*domainRecord).ID
-			corr := &models.Correction{
-				Msg: fmt.Sprintf("%s, porkbun ID: %s", m.String(), id),
-				F: func() error {
-					return c.deleteRecord(dc.Name, id)
-				},
-			}
-			corrections = append(corrections, corr)
-		}
-
-		for _, m := range create {
-			req, err := toReq(m.Desired)
-			if err != nil {
-				return nil, err
-			}
-
-			corr := &models.Correction{
-				Msg: m.String(),
-				F: func() error {
-					return c.createRecord(dc.Name, req)
-				},
-			}
-			corrections = append(corrections, corr)
-		}
-
-		for _, m := range modify {
-			id := m.Existing.Original.(*domainRecord).ID
-			req, err := toReq(m.Desired)
-			if err != nil {
-				return nil, err
-			}
-
-			corr := &models.Correction{
-				Msg: fmt.Sprintf("%s, porkbun ID: %s", m.String(), id),
-				F: func() error {
-					return c.modifyRecord(dc.Name, id, req)
-				},
-			}
-			corrections = append(corrections, corr)
-		}
-
-		return corrections, nil
-	}
-
-	changes, err := diff2.ByRecord(existingRecords, dc, nil)
+	changes, actualChangeCount, err := diff2.ByRecord(existingRecords, dc, genComparable)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	for _, change := range changes {
 		var corr *models.Correction
@@ -153,11 +140,14 @@ func (c *porkbunProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, exi
 		case diff2.CREATE:
 			req, err := toReq(change.New[0])
 			if err != nil {
-				return nil, err
+				return nil, 0, err
 			}
 			corr = &models.Correction{
 				Msg: change.Msgs[0],
 				F: func() error {
+					if change.New[0].Type == "PORKBUN_URLFWD" {
+						return c.createURLForwardingRecord(dc.Name, req)
+					}
 					return c.createRecord(dc.Name, req)
 				},
 			}
@@ -165,11 +155,14 @@ func (c *porkbunProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, exi
 			id := change.Old[0].Original.(*domainRecord).ID
 			req, err := toReq(change.New[0])
 			if err != nil {
-				return nil, err
+				return nil, 0, err
 			}
 			corr = &models.Correction{
 				Msg: fmt.Sprintf("%s, porkbun ID: %s", change.Msgs[0], id),
 				F: func() error {
+					if change.New[0].Type == "PORKBUN_URLFWD" {
+						return c.modifyURLForwardingRecord(dc.Name, id, req)
+					}
 					return c.modifyRecord(dc.Name, id, req)
 				},
 			}
@@ -178,6 +171,9 @@ func (c *porkbunProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, exi
 			corr = &models.Correction{
 				Msg: fmt.Sprintf("%s, porkbun ID: %s", change.Msgs[0], id),
 				F: func() error {
+					if change.Old[0].Type == "PORKBUN_URLFWD" {
+						return c.deleteURLForwardingRecord(dc.Name, id)
+					}
 					return c.deleteRecord(dc.Name, id)
 				},
 			}
@@ -187,7 +183,7 @@ func (c *porkbunProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, exi
 		corrections = append(corrections, corr)
 	}
 
-	return corrections, nil
+	return corrections, actualChangeCount, nil
 }
 
 // GetZoneRecords gets the records of a zone and returns them in RecordConfig format.
@@ -196,9 +192,54 @@ func (c *porkbunProvider) GetZoneRecords(domain string, meta map[string]string) 
 	if err != nil {
 		return nil, err
 	}
-	existingRecords := make([]*models.RecordConfig, len(records))
+	forwards, err := c.getURLForwardingRecords(domain)
+	if err != nil {
+		return nil, err
+	}
+	existingRecords := make([]*models.RecordConfig, 0)
 	for i := range records {
-		existingRecords[i] = toRc(domain, &records[i])
+		shouldSkip := false
+		if strings.HasSuffix(records[i].Content, ".porkbun.com") {
+			name := dnsutil.TrimDomainName(records[i].Name, domain)
+			if name == "@" {
+				name = ""
+			}
+			if records[i].Type == "ALIAS" {
+				for _, forward := range forwards {
+					if name == forward.Subdomain {
+						shouldSkip = true
+						break
+					}
+				}
+			}
+			if records[i].Type == "CNAME" {
+				for _, forward := range forwards {
+					if name == "*."+forward.Subdomain {
+						shouldSkip = true
+						break
+					}
+				}
+			}
+		}
+		if shouldSkip {
+			continue
+		}
+		existingRecords = append(existingRecords, toRc(domain, &records[i]))
+	}
+	for i := range forwards {
+		r := &forwards[i]
+		rc := &models.RecordConfig{
+			Type:     "PORKBUN_URLFWD",
+			Original: r,
+			Metadata: map[string]string{
+				metaType:        r.Type,
+				metaIncludePath: r.IncludePath,
+				metaWildcard:    r.Wildcard,
+			},
+		}
+		rc.SetLabel(r.Subdomain, domain)
+		rc.SetTarget(r.Location)
+		existingRecords = append(existingRecords, rc)
 	}
 	return existingRecords, nil
 }
@@ -263,6 +304,20 @@ func toRc(domain string, r *domainRecord) *models.RecordConfig {
 
 // toReq takes a RecordConfig and turns it into the native format used by the API.
 func toReq(rc *models.RecordConfig) (requestParams, error) {
+	if rc.Type == "PORKBUN_URLFWD" {
+		subdomain := rc.GetLabel()
+		if subdomain == "@" {
+			subdomain = ""
+		}
+		return requestParams{
+			"subdomain":   subdomain,
+			"location":    rc.GetTargetField(),
+			"type":        rc.Metadata[metaType],
+			"includePath": rc.Metadata[metaIncludePath],
+			"wildcard":    rc.Metadata[metaWildcard],
+		}, nil
+	}
+
 	req := requestParams{
 		"type":    rc.Type,
 		"name":    rc.GetLabel(),
@@ -316,4 +371,32 @@ func fixTTL(ttl uint32) uint32 {
 		return ttl
 	}
 	return minimumTTL
+}
+
+func (c *porkbunProvider) GetRegistrarCorrections(dc *models.DomainConfig) ([]*models.Correction, error) {
+	nss, err := c.getNameservers(dc.Name)
+	if err != nil {
+		return nil, err
+	}
+	foundNameservers := strings.Join(nss, ",")
+
+	expected := []string{}
+	for _, ns := range dc.Nameservers {
+		expected = append(expected, ns.Name)
+	}
+	sort.Strings(expected)
+	expectedNameservers := strings.Join(expected, ",")
+
+	if foundNameservers == expectedNameservers {
+		return nil, nil
+	}
+
+	return []*models.Correction{
+		{
+			Msg: fmt.Sprintf("Update nameservers %s -> %s", foundNameservers, expectedNameservers),
+			F: func() error {
+				return c.updateNameservers(expected, dc.Name)
+			},
+		},
+	}, nil
 }

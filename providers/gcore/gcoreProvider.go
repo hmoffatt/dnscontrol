@@ -7,8 +7,8 @@ import (
 	"strings"
 
 	"github.com/StackExchange/dnscontrol/v4/models"
-	"github.com/StackExchange/dnscontrol/v4/pkg/diff"
 	"github.com/StackExchange/dnscontrol/v4/pkg/diff2"
+	"github.com/StackExchange/dnscontrol/v4/pkg/printer"
 	"github.com/StackExchange/dnscontrol/v4/providers"
 
 	dnssdk "github.com/G-Core/gcore-dns-sdk-go"
@@ -42,17 +42,22 @@ func NewGCore(m map[string]string, metadata json.RawMessage) (providers.DNSServi
 }
 
 var features = providers.DocumentationNotes{
-	providers.CanAutoDNSSEC:          providers.Cannot(),
+	// The default for unlisted capabilities is 'Cannot'.
+	// See providers/capabilities.go for the entire list of capabilities.
+	providers.CanAutoDNSSEC:          providers.Can(),
 	providers.CanGetZones:            providers.Can(),
-	providers.CanUseAlias:            providers.Cannot(),
+	providers.CanConcur:              providers.Cannot(),
+	providers.CanUseAlias:            providers.Can(),
 	providers.CanUseCAA:              providers.Can(),
 	providers.CanUseDS:               providers.Cannot(),
 	providers.CanUseLOC:              providers.Cannot(),
 	providers.CanUseNAPTR:            providers.Cannot(),
-	providers.CanUsePTR:              providers.Cannot(),
+	providers.CanUsePTR:              providers.Can("G-Core supports PTR records only in rDNS zones"),
 	providers.CanUseSRV:              providers.Can("G-Core doesn't support SRV records with empty targets"),
 	providers.CanUseSSHFP:            providers.Cannot(),
 	providers.CanUseTLSA:             providers.Cannot(),
+	providers.CanUseHTTPS:            providers.Can(),
+	providers.CanUseSVCB:             providers.Can(),
 	providers.DocCreateDomains:       providers.Can(),
 	providers.DocDualHost:            providers.Can(),
 	providers.DocOfficiallySupported: providers.Cannot(),
@@ -64,11 +69,14 @@ var defaultNameServerNames = []string{
 }
 
 func init() {
+	const providerName = "GCORE"
+	const providerMaintainer = "@xddxdd"
 	fns := providers.DspFuncs{
 		Initializer:   NewGCore,
 		RecordAuditor: AuditRecords,
 	}
-	providers.RegisterDomainServiceProviderType("GCORE", fns, features)
+	providers.RegisterDomainServiceProviderType(providerName, fns, features)
+	providers.RegisterMaintainer(providerName, providerMaintainer)
 }
 
 // GetNameservers returns the nameservers for a domain.
@@ -130,130 +138,108 @@ func generateChangeMsg(updates []string) string {
 // a list of functions to call to actually make the desired
 // correction, and a message to output to the user when the change is
 // made.
-func (c *gcoreProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, existing models.Records) ([]*models.Correction, error) {
+func (c *gcoreProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, existing models.Records) ([]*models.Correction, int, error) {
 
 	// Make delete happen earlier than creates & updates.
 	var corrections []*models.Correction
 	var deletions []*models.Correction
 	var reports []*models.Correction
 
-	if !diff2.EnableDiff2 {
+	// Gcore auto uses ALIAS for apex zone CNAME records, just like CloudFlare
+	for _, rec := range dc.Records {
+		if rec.Type == "ALIAS" {
+			rec.Type = "CNAME"
+		}
+	}
 
-		// diff existing vs. current.
-		differ := diff.New(dc)
-		keysToUpdate, err := differ.ChangedGroups(existing)
+	changes, actualChangeCount, err := diff2.ByRecordSet(existing, dc, comparableFunc)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	for _, change := range changes {
+		record, err := recordsToNative(change.New, change.Key)
 		if err != nil {
-			return nil, err
-		}
-		if len(keysToUpdate) == 0 {
-			return nil, nil
+			return nil, 0, err
 		}
 
-		desiredRecords := dc.Records.GroupedByKey()
-		existingRecords := existing.GroupedByKey()
+		// Copy all params to avoid overwrites
+		zone := dc.Name
+		name := change.Key.NameFQDN
+		typ := change.Key.Type
+		msg := generateChangeMsg(change.Msgs)
 
-		for label := range keysToUpdate {
-			if _, ok := desiredRecords[label]; !ok {
-				// record deleted in update
-				// Copy all params to avoid overwrites
-				zone := dc.Name
-				name := label.NameFQDN
-				typ := label.Type
-				msg := generateChangeMsg(keysToUpdate[label])
-				deletions = append(deletions, &models.Correction{
-					Msg: msg,
-					F: func() error {
-						return c.provider.DeleteRRSet(c.ctx, zone, name, typ)
-					},
-				})
-
-			} else if _, ok := existingRecords[label]; !ok {
-				// record created in update
-				record := recordsToNative(desiredRecords[label], label)
-				if record == nil {
-					panic("No records matching label")
-				}
-
-				// Copy all params to avoid overwrites
-				zone := dc.Name
-				name := label.NameFQDN
-				typ := label.Type
-				msg := generateChangeMsg(keysToUpdate[label])
-				corrections = append(corrections, &models.Correction{
-					Msg: msg,
-					F: func() error {
-						return c.provider.CreateRRSet(c.ctx, zone, name, typ, *record)
-					},
-				})
-
-			} else {
-				// record modified in update
-				record := recordsToNative(desiredRecords[label], label)
-				if record == nil {
-					panic("No records matching label")
-				}
-
-				// Copy all params to avoid overwrites
-				zone := dc.Name
-				name := label.NameFQDN
-				typ := label.Type
-				msg := generateChangeMsg(keysToUpdate[label])
-				corrections = append(corrections, &models.Correction{
-					Msg: msg,
-					F: func() error {
-						return c.provider.UpdateRRSet(c.ctx, zone, name, typ, *record)
-					},
-				})
-			}
+		switch change.Type {
+		case diff2.REPORT:
+			corrections = append(corrections, &models.Correction{Msg: change.MsgsJoined})
+		case diff2.CREATE:
+			corrections = append(corrections, &models.Correction{
+				Msg: msg,
+				F: func() error {
+					return c.provider.CreateRRSet(c.ctx, zone, name, typ, *record)
+				},
+			})
+		case diff2.CHANGE:
+			corrections = append(corrections, &models.Correction{
+				Msg: msg,
+				F: func() error {
+					return c.provider.UpdateRRSet(c.ctx, zone, name, typ, *record)
+				},
+			})
+		case diff2.DELETE:
+			deletions = append(deletions, &models.Correction{
+				Msg: msg,
+				F: func() error {
+					return c.provider.DeleteRRSet(c.ctx, zone, name, typ)
+				},
+			})
+		default:
+			panic(fmt.Sprintf("unhandled change.Type %s", change.Type))
 		}
+	}
 
-	} else {
-		// Diff2 version
-		changes, err := diff2.ByRecordSet(existing, dc, nil)
-		if err != nil {
-			return nil, err
-		}
+	dnssecEnabled, err := c.dnssdkGetDNSSEC(dc.Name)
+	if err != nil {
+		return nil, 0, err
+	}
 
-		for _, change := range changes {
-			record := recordsToNative(change.New, change.Key)
-
-			// Copy all params to avoid overwrites
-			zone := dc.Name
-			name := change.Key.NameFQDN
-			typ := change.Key.Type
-			msg := generateChangeMsg(change.Msgs)
-
-			switch change.Type {
-			case diff2.REPORT:
-				corrections = append(corrections, &models.Correction{Msg: change.MsgsJoined})
-			case diff2.CREATE:
-				corrections = append(corrections, &models.Correction{
-					Msg: msg,
-					F: func() error {
-						return c.provider.CreateRRSet(c.ctx, zone, name, typ, *record)
-					},
-				})
-			case diff2.CHANGE:
-				corrections = append(corrections, &models.Correction{
-					Msg: msg,
-					F: func() error {
-						return c.provider.UpdateRRSet(c.ctx, zone, name, typ, *record)
-					},
-				})
-			case diff2.DELETE:
-				deletions = append(deletions, &models.Correction{
-					Msg: msg,
-					F: func() error {
-						return c.provider.DeleteRRSet(c.ctx, zone, name, typ)
-					},
-				})
-			default:
-				panic(fmt.Sprintf("unhandled change.Type %s", change.Type))
-			}
-		}
+	if !dnssecEnabled && dc.AutoDNSSEC == "on" {
+		// Copy all params to avoid overwrites
+		zone := dc.Name
+		corrections = append(corrections, &models.Correction{
+			Msg: "Enable DNSSEC",
+			F: func() error {
+				return c.dnssdkSetDNSSEC(zone, true)
+			},
+		})
+	} else if dnssecEnabled && dc.AutoDNSSEC == "off" {
+		// Copy all params to avoid overwrites
+		zone := dc.Name
+		corrections = append(corrections, &models.Correction{
+			Msg: "Disable DNSSEC",
+			F: func() error {
+				return c.dnssdkSetDNSSEC(zone, false)
+			},
+		})
 	}
 
 	result := append(reports, deletions...)
 	result = append(result, corrections...)
-	return result, nil
+	return result, actualChangeCount, nil
+}
+
+func comparableFunc(rec *models.RecordConfig) string {
+	if len(rec.Metadata) == 0 {
+		return ""
+	}
+
+	// json.Marshal always serialize all fields in alphabetical order,
+	// so the metadata string will be consistent between runs
+	result, err := json.Marshal(rec.Metadata)
+	if err != nil {
+		printer.Warnf("Cannot serialize metadata of record %s", rec)
+		return ""
+	}
+
+	return string(result)
 }

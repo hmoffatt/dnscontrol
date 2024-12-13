@@ -16,6 +16,7 @@ type CLI interface {
 	StartDomain(domain string)
 	StartDNSProvider(name string, skip bool)
 	EndProvider(name string, numCorrections int, err error)
+	EndProvider2(name string, numCorrections int)
 	StartRegistrar(name string, skip bool)
 
 	PrintCorrection(n int, c *models.Correction)
@@ -31,6 +32,7 @@ type Printer interface {
 	Println(lines ...string)
 	Warnf(fmt string, args ...interface{})
 	Errorf(fmt string, args ...interface{})
+	PrintfIf(print bool, fmt string, args ...interface{})
 }
 
 // Debugf is called to print/format debug information.
@@ -54,8 +56,13 @@ func Warnf(fmt string, args ...interface{}) {
 }
 
 // Errorf is called to print/format an error.
-func Errorf(fmt string, args ...interface{}) {
-	DefaultPrinter.Errorf(fmt, args...)
+// func Errorf(fmt string, args ...interface{}) {
+// 	DefaultPrinter.Errorf(fmt, args...)
+// }
+
+// PrintfIf is called to optionally print something.
+func PrintfIf(print bool, fmt string, args ...interface{}) {
+	DefaultPrinter.PrintfIf(print, fmt, args...)
 }
 
 var (
@@ -71,6 +78,9 @@ var (
 // This is a hack until we have the new printer replacement. The long
 // variable name is easy to grep for when we make the conversion.
 var SkinnyReport = true
+
+// MaxReport represents how many records to show if SkinnyReport == true
+var MaxReport = 5
 
 // ConsolePrinter is a handle for the console printer.
 type ConsolePrinter struct {
@@ -92,14 +102,12 @@ func (c ConsolePrinter) PrintCorrection(i int, correction *models.Correction) {
 
 // PrintReport is called to print/format each non-mutating correction (diff2.REPORT).
 func (c ConsolePrinter) PrintReport(i int, correction *models.Correction) {
-	// When diff1 is eliminated:
-	//fmt.Fprintf(c.Writer, "INFO#%d: %s\n", i+1, correction.Msg)
-	fmt.Fprintf(c.Writer, "INFO: %s\n", correction.Msg)
+	fmt.Fprintf(c.Writer, "INFO#%d: %s\n", i+1, correction.Msg)
 }
 
 // PromptToRun prompts the user to see if they want to execute a correction.
 func (c ConsolePrinter) PromptToRun() bool {
-	fmt.Fprint(c.Writer, "Run? (Y/n): ")
+	fmt.Fprint(c.Writer, "Run? (y/N): ")
 	txt, err := c.Reader.ReadString('\n')
 	run := true
 	if err != nil {
@@ -128,7 +136,7 @@ func (c ConsolePrinter) EndCorrection(err error) {
 func (c ConsolePrinter) StartDNSProvider(provider string, skip bool) {
 	lbl := ""
 	if skip {
-		lbl = " (skipping)\n"
+		lbl = " (skipping)"
 	}
 	if !SkinnyReport {
 		fmt.Fprintf(c.Writer, "----- DNS Provider: %s...%s\n", provider, lbl)
@@ -139,7 +147,7 @@ func (c ConsolePrinter) StartDNSProvider(provider string, skip bool) {
 func (c ConsolePrinter) StartRegistrar(provider string, skip bool) {
 	lbl := ""
 	if skip {
-		lbl = " (skipping)\n"
+		lbl = " (skipping)"
 	}
 	if !SkinnyReport {
 		fmt.Fprintf(c.Writer, "----- Registrar: %s...%s\n", provider, lbl)
@@ -161,6 +169,18 @@ func (c ConsolePrinter) EndProvider(name string, numCorrections int, err error) 
 		}
 		fmt.Fprintf(c.Writer, "%d correction%s (%s)\n", numCorrections, plural, name)
 	}
+}
+
+// EndProvider2 is called at the end of each provider.
+func (c ConsolePrinter) EndProvider2(name string, numCorrections int) {
+	plural := "s"
+	if numCorrections == 1 {
+		plural = ""
+	}
+	if (SkinnyReport) && (numCorrections == 0) {
+		return
+	}
+	fmt.Fprintf(c.Writer, "%d correction%s (%s)\n", numCorrections, plural, name)
 }
 
 // Debugf is called to print/format debug information.
@@ -188,4 +208,11 @@ func (c ConsolePrinter) Warnf(format string, args ...interface{}) {
 // Errorf is called to print/format an error.
 func (c ConsolePrinter) Errorf(format string, args ...interface{}) {
 	fmt.Fprintf(c.Writer, "ERROR: "+format, args...)
+}
+
+// PrintfIf is called to optionally print/format a message.
+func (c ConsolePrinter) PrintfIf(print bool, format string, args ...interface{}) {
+	if print {
+		fmt.Fprintf(c.Writer, format, args...)
+	}
 }

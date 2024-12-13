@@ -72,6 +72,15 @@ func RegisterDomainServiceProviderType(name string, fns DspFuncs, pm ...Provider
 	unwrapProviderCapabilities(name, pm)
 }
 
+var ProviderMaintainers = map[string]string{}
+
+func RegisterMaintainer(
+	providerName string,
+	gitHubUsername string,
+) {
+	ProviderMaintainers[providerName] = gitHubUsername
+}
+
 // CreateRegistrar initializes a registrar instance from given credentials.
 func CreateRegistrar(rType string, config map[string]string) (Registrar, error) {
 	var err error
@@ -162,8 +171,8 @@ func (n None) GetZoneRecords(domain string, meta map[string]string) (models.Reco
 }
 
 // GetZoneRecordsCorrections gets the records of a zone and returns them in RecordConfig format.
-func (n None) GetZoneRecordsCorrections(dc *models.DomainConfig, records models.Records) ([]*models.Correction, error) {
-	return nil, nil
+func (n None) GetZoneRecordsCorrections(dc *models.DomainConfig, records models.Records) ([]*models.Correction, int, error) {
+	return nil, 0, nil
 }
 
 // GetDomainCorrections returns corrections to update a domain.
@@ -171,10 +180,16 @@ func (n None) GetDomainCorrections(dc *models.DomainConfig) ([]*models.Correctio
 	return nil, nil
 }
 
+var featuresNone = DocumentationNotes{
+	// The default for unlisted capabilities is 'Cannot'.
+	// See providers/capabilities.go for the entire list of capabilities.
+	CanConcur: Can(),
+}
+
 func init() {
 	RegisterRegistrarType("NONE", func(map[string]string) (Registrar, error) {
 		return None{}, nil
-	})
+	}, featuresNone)
 }
 
 // CustomRType stores an rtype that is only valid for this DSP.

@@ -3,6 +3,7 @@ package powerdns
 import (
 	"encoding/json"
 	"fmt"
+
 	"github.com/mittwald/go-powerdns/apis/zones"
 
 	"github.com/StackExchange/dnscontrol/v4/models"
@@ -11,11 +12,15 @@ import (
 )
 
 var features = providers.DocumentationNotes{
+	// The default for unlisted capabilities is 'Cannot'.
+	// See providers/capabilities.go for the entire list of capabilities.
 	providers.CanAutoDNSSEC:          providers.Can(),
 	providers.CanGetZones:            providers.Can(),
+	providers.CanConcur:              providers.Cannot(),
 	providers.CanUseAlias:            providers.Can("Needs to be enabled in PowerDNS first", "https://doc.powerdns.com/authoritative/guides/alias.html"),
 	providers.CanUseCAA:              providers.Can(),
 	providers.CanUseDS:               providers.Can(),
+	providers.CanUseDHCID:            providers.Can(),
 	providers.CanUseLOC:              providers.Unimplemented("Normalization within the PowerDNS API seems to be buggy, so disabled", "https://github.com/PowerDNS/pdns/issues/10558"),
 	providers.CanUseNAPTR:            providers.Can(),
 	providers.CanUsePTR:              providers.Can(),
@@ -28,11 +33,14 @@ var features = providers.DocumentationNotes{
 }
 
 func init() {
+	const providerName = "POWERDNS"
+	const providerMaintainer = "@jpbede"
 	fns := providers.DspFuncs{
 		Initializer:   newDSP,
 		RecordAuditor: AuditRecords,
 	}
-	providers.RegisterDomainServiceProviderType("POWERDNS", fns, features)
+	providers.RegisterDomainServiceProviderType(providerName, fns, features)
+	providers.RegisterMaintainer(providerName, providerMaintainer)
 }
 
 // powerdnsProvider represents the powerdnsProvider DNSServiceProvider.
@@ -44,6 +52,7 @@ type powerdnsProvider struct {
 	DefaultNS      []string       `json:"default_ns"`
 	DNSSecOnCreate bool           `json:"dnssec_on_create"`
 	ZoneKind       zones.ZoneKind `json:"zone_kind"`
+	SOAEditAPI     string         `json:"soa_edit_api,omitempty"`
 
 	nameservers []*models.Nameserver
 }

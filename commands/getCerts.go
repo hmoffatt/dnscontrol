@@ -19,11 +19,13 @@ var _ = cmd(catUtils, func() *cli.Command {
 	var args GetCertsArgs
 	return &cli.Command{
 		Name:  "get-certs",
-		Usage: "Issue certificates via Let's Encrypt",
+		Usage: "DEPRECATED: Issue certificates via Let's Encrypt",
 		Action: func(c *cli.Context) error {
 			return exit(GetCerts(args))
 		},
 		Flags: args.flags(),
+
+		Hidden: true,
 	}
 }())
 

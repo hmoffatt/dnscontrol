@@ -24,9 +24,7 @@ import (
 
 	"github.com/StackExchange/dnscontrol/v4/models"
 	"github.com/StackExchange/dnscontrol/v4/pkg/diff"
-	"github.com/StackExchange/dnscontrol/v4/pkg/diff2"
 	"github.com/StackExchange/dnscontrol/v4/pkg/printer"
-	"github.com/StackExchange/dnscontrol/v4/pkg/txtutil"
 	"github.com/StackExchange/dnscontrol/v4/providers"
 	"github.com/miekg/dns/dnsutil"
 )
@@ -35,18 +33,24 @@ import (
 
 // init registers the provider to dnscontrol.
 func init() {
+	const providerName = "LOOPIA"
+	const providerMaintainer = "@systemcrash"
 	fns := providers.DspFuncs{
 		Initializer:   newDsp,
 		RecordAuditor: AuditRecords,
 	}
-	providers.RegisterDomainServiceProviderType("LOOPIA", fns, features)
-	providers.RegisterRegistrarType("LOOPIA", newReg)
+	providers.RegisterDomainServiceProviderType(providerName, fns, features)
+	providers.RegisterRegistrarType(providerName, newReg)
+	providers.RegisterMaintainer(providerName, providerMaintainer)
 }
 
 // features declares which features and options are available.
 var features = providers.DocumentationNotes{
+	// The default for unlisted capabilities is 'Cannot'.
+	// See providers/capabilities.go for the entire list of capabilities.
 	providers.CanAutoDNSSEC:          providers.Cannot(),
 	providers.CanGetZones:            providers.Can(),
+	providers.CanConcur:              providers.Cannot(),
 	providers.CanUseAKAMAICDN:        providers.Cannot(),
 	providers.CanUseAlias:            providers.Cannot(),
 	providers.CanUseAzureAlias:       providers.Cannot(),
@@ -80,7 +84,7 @@ func newReg(conf map[string]string) (providers.Registrar, error) {
 }
 
 // newHelper generates a handle.
-func newHelper(m map[string]string, metadata json.RawMessage) (*APIClient, error) {
+func newHelper(m map[string]string, _ json.RawMessage) (*APIClient, error) {
 	if m["username"] == "" {
 		return nil, fmt.Errorf("missing Loopia API username")
 	}
@@ -266,30 +270,26 @@ func gatherAffectedLabels(groups map[models.RecordKey][]string) (labels map[stri
 }
 
 // GetZoneRecordsCorrections returns a list of corrections that will turn existing records into dc.Records.
-func (c *APIClient) GetZoneRecordsCorrections(dc *models.DomainConfig, existingRecords models.Records) ([]*models.Correction, error) {
+func (c *APIClient) GetZoneRecordsCorrections(dc *models.DomainConfig, existingRecords models.Records) ([]*models.Correction, int, error) {
+
 	if c.Debug {
 		debugRecords("GenerateZoneRecordsCorrections input:\n", existingRecords)
 	}
 
-	// Normalize
-	txtutil.SplitSingleLongTxt(dc.Records) // Autosplit long TXT records
 	PrepDesiredRecords(dc)
 
-	var corrections []*models.Correction
 	var keysToUpdate map[models.RecordKey][]string
-	var differ diff.Differ
-	if !diff2.EnableDiff2 {
-		differ = diff.New(dc)
-	} else {
-		differ = diff.NewCompat(dc)
-	}
-	_, create, del, modify, err := differ.IncrementalDiff(existingRecords)
+	differ := diff.NewCompat(dc)
+	toReport, create, del, modify, actualChangeCount, err := differ.IncrementalDiff(existingRecords)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	keysToUpdate, err = differ.ChangedGroups(existingRecords)
+	// Start corrections with the reports
+	corrections := diff.GenerateMessageCorrections(toReport)
+
+	keysToUpdate, _, _, err = differ.ChangedGroups(existingRecords)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	for _, d := range create {
@@ -365,7 +365,7 @@ func (c *APIClient) GetZoneRecordsCorrections(dc *models.DomainConfig, existingR
 		})
 	}
 
-	return corrections, nil
+	return corrections, actualChangeCount, nil
 }
 
 // debugRecords prints a list of RecordConfig.

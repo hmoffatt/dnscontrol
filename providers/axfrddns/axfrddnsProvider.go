@@ -12,7 +12,6 @@ axfrddns -
 */
 
 import (
-	"bytes"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
@@ -24,10 +23,8 @@ import (
 	"time"
 
 	"github.com/StackExchange/dnscontrol/v4/models"
-	"github.com/StackExchange/dnscontrol/v4/pkg/diff"
 	"github.com/StackExchange/dnscontrol/v4/pkg/diff2"
 	"github.com/StackExchange/dnscontrol/v4/pkg/printer"
-	"github.com/StackExchange/dnscontrol/v4/pkg/txtutil"
 	"github.com/StackExchange/dnscontrol/v4/providers"
 	"github.com/fatih/color"
 	"github.com/miekg/dns"
@@ -40,16 +37,21 @@ const (
 )
 
 var features = providers.DocumentationNotes{
+	// The default for unlisted capabilities is 'Cannot'.
+	// See providers/capabilities.go for the entire list of capabilities.
 	providers.CanAutoDNSSEC:          providers.Can("Just warn when DNSSEC is requested but no RRSIG is found in the AXFR or warn when DNSSEC is not requested but RRSIG are found in the AXFR."),
 	providers.CanGetZones:            providers.Cannot(),
+	providers.CanConcur:              providers.Cannot(),
 	providers.CanUseCAA:              providers.Can(),
+	providers.CanUseDHCID:            providers.Can(),
+	providers.CanUseHTTPS:            providers.Can(),
 	providers.CanUseLOC:              providers.Unimplemented(),
 	providers.CanUseNAPTR:            providers.Can(),
 	providers.CanUsePTR:              providers.Can(),
 	providers.CanUseSRV:              providers.Can(),
 	providers.CanUseSSHFP:            providers.Can(),
+	providers.CanUseSVCB:             providers.Can(),
 	providers.CanUseTLSA:             providers.Can(),
-	providers.CantUseNOPURGE:         providers.Cannot(),
 	providers.DocCreateDomains:       providers.Cannot(),
 	providers.DocDualHost:            providers.Cannot(),
 	providers.DocOfficiallySupported: providers.Cannot(),
@@ -60,6 +62,7 @@ type axfrddnsProvider struct {
 	rand                *rand.Rand
 	master              string
 	updateMode          string
+	transferServer      string
 	transferMode        string
 	nameservers         []*models.Nameserver
 	transferKey         *Key
@@ -127,6 +130,14 @@ func initAxfrDdns(config map[string]string, providermeta json.RawMessage) (provi
 	} else {
 		return nil, fmt.Errorf("nameservers list is empty: creds.json needs a default `nameservers` or an explicit `master`")
 	}
+	if config["transfer-server"] != "" {
+		api.transferServer = config["transfer-server"]
+		if !strings.Contains(api.transferServer, ":") {
+			api.transferServer = api.transferServer + ":53"
+		}
+	} else {
+		api.transferServer = api.master
+	}
 	api.updateKey, err = readKey(config["update-key"], "update-key")
 	if err != nil {
 		return nil, err
@@ -147,6 +158,7 @@ func initAxfrDdns(config map[string]string, providermeta json.RawMessage) (provi
 			"nameservers",
 			"update-key",
 			"transfer-key",
+			"transfer-server",
 			"update-mode",
 			"transfer-mode",
 			"domain",
@@ -160,11 +172,14 @@ func initAxfrDdns(config map[string]string, providermeta json.RawMessage) (provi
 }
 
 func init() {
+	const providerName = "AXFRDDNS"
+	const providerMaintainer = "@hnrgrgr"
 	fns := providers.DspFuncs{
 		Initializer:   initAxfrDdns,
 		RecordAuditor: AuditRecords,
 	}
-	providers.RegisterDomainServiceProviderType("AXFRDDNS", fns, features)
+	providers.RegisterDomainServiceProviderType(providerName, fns, features)
+	providers.RegisterMaintainer(providerName, providerMaintainer)
 }
 
 // Param is used to decode extra parameters sent to provider.
@@ -204,7 +219,8 @@ func readKey(raw string, kind string) (*Key, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot decode Base64 secret (%s) in AXFRDDNS.TSIG", kind)
 	}
-	return &Key{algo: algo, id: arr[1] + ".", secret: arr[2]}, nil
+	id := dns.CanonicalName(arr[1])
+	return &Key{algo: algo, id: id, secret: arr[2]}, nil
 }
 
 // GetNameservers returns the nameservers for a domain.
@@ -216,9 +232,9 @@ func (c *axfrddnsProvider) getAxfrConnection() (*dns.Transfer, error) {
 	var con net.Conn = nil
 	var err error = nil
 	if c.transferMode == "tcp-tls" {
-		con, err = tls.Dial("tcp", c.master, &tls.Config{})
+		con, err = tls.Dial("tcp", c.transferServer, &tls.Config{})
 	} else {
-		con, err = net.Dial("tcp", c.master)
+		con, err = net.Dial("tcp", c.transferServer)
 	}
 	if err != nil {
 		return nil, err
@@ -249,7 +265,7 @@ func (c *axfrddnsProvider) FetchZoneRecords(domain string) ([]dns.RR, error) {
 		}
 	}
 
-	envelope, err := transfer.In(request, c.master)
+	envelope, err := transfer.In(request, c.transferServer)
 	if err != nil {
 		return nil, err
 	}
@@ -328,8 +344,8 @@ func (c *axfrddnsProvider) GetZoneRecords(domain string, meta map[string]string)
 		last := foundRecords[len(foundRecords)-1]
 		if last.Type == "TXT" &&
 			last.Name == dnssecDummyLabel &&
-			len(last.TxtStrings) == 1 &&
-			last.TxtStrings[0] == dnssecDummyTxt {
+			last.GetTargetTXTSegmentCount() == 1 &&
+			last.GetTargetTXTSegmented()[0] == dnssecDummyTxt {
 			c.hasDnssecRecords = true
 			foundRecords = foundRecords[0:(len(foundRecords) - 1)]
 		}
@@ -410,9 +426,7 @@ func hasNSDeletion(changes diff2.ChangeList) bool {
 }
 
 // GetZoneRecordsCorrections returns a list of corrections that will turn existing records into dc.Records.
-func (c *axfrddnsProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, foundRecords models.Records) ([]*models.Correction, error) {
-	txtutil.SplitSingleLongTxt(foundRecords) // Autosplit long TXT records
-
+func (c *axfrddnsProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, foundRecords models.Records) ([]*models.Correction, int, error) {
 	// Ignoring the SOA, others providers don't manage it either.
 	if len(foundRecords) >= 1 && foundRecords[0].Type == "SOA" {
 		foundRecords = foundRecords[1:]
@@ -452,121 +466,19 @@ func (c *axfrddnsProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, fo
 
 	dummyNs1, err := dns.NewRR(dc.Name + ". IN NS 255.255.255.255")
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	dummyNs2, err := dns.NewRR(dc.Name + ". IN NS 255.255.255.255")
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
-	if !diff2.EnableDiff2 {
-
-		// Legacy code with the old `diff`
-
-		differ := diff.New(dc)
-		_, create, del, mod, err := differ.IncrementalDiff(foundRecords)
-		if err != nil {
-			return nil, err
-		}
-
-		changes := false
-		buf := &bytes.Buffer{}
-		buf2 := &bytes.Buffer{}
-
-		// See comment below about hasNSDeletion.
-		hasNSDeletion := false
-		for _, c := range create {
-			if c.Desired.Type == "NS" && c.Desired.Name == "@" {
-				hasNSDeletion = true
-				continue
-			}
-		}
-		for _, c := range del {
-			if c.Existing.Type == "NS" && c.Existing.Name == "@" {
-				hasNSDeletion = true
-				continue
-			}
-		}
-		for _, c := range mod {
-			if c.Existing.Type == "NS" && c.Existing.Name == "@" {
-				hasNSDeletion = true
-				continue
-			}
-		}
-
-		if hasNSDeletion {
-			update.Insert([]dns.RR{dummyNs1})
-		}
-
-		for _, change := range del {
-			changes = true
-			fmt.Fprintln(buf, change)
-			update.Remove([]dns.RR{change.Existing.ToRR()})
-		}
-		for _, change := range mod {
-			changes = true
-			if c.serverHasBuggyCNAME && change.Desired.Type == "CNAME" {
-				fmt.Fprintln(buf, change.String()+color.RedString(" (delete)"))
-				update.Remove([]dns.RR{change.Existing.ToRR()})
-				hasTwoCorrections = true
-				fmt.Fprintln(buf2, change.String()+color.GreenString(" (create)"))
-				update2.Insert([]dns.RR{change.Desired.ToRR()})
-			} else {
-				fmt.Fprintln(buf, change)
-				update.Remove([]dns.RR{change.Existing.ToRR()})
-				update.Insert([]dns.RR{change.Desired.ToRR()})
-			}
-		}
-		for _, change := range create {
-			changes = true
-			splitted := false
-			if c.serverHasBuggyCNAME && change.Desired.Type == "CNAME" {
-				for _, change2 := range del {
-					if change2.Existing.Name == change.Desired.Name {
-						splitted = true
-						break
-					}
-				}
-			}
-			if splitted {
-				hasTwoCorrections = true
-				fmt.Fprintln(buf2, change)
-				update2.Insert([]dns.RR{change.Desired.ToRR()})
-			} else {
-				fmt.Fprintln(buf, change)
-				update.Insert([]dns.RR{change.Desired.ToRR()})
-			}
-		}
-
-		if hasNSDeletion {
-			update.Remove([]dns.RR{dummyNs2})
-		}
-
-		if !changes {
-			return nil, nil
-		}
-
-		if hasTwoCorrections {
-
-			return []*models.Correction{
-				c.BuildCorrection(dc, []string{buf.String()}, update),
-				c.BuildCorrection(dc, []string{buf2.String()}, update2),
-			}, nil
-
-		}
-
-		return []*models.Correction{
-			c.BuildCorrection(dc, []string{buf.String()}, update),
-		}, nil
-
-	}
-
-	changes, err := diff2.ByRecord(foundRecords, dc, nil)
+	changes, actualChangeCount, err := diff2.ByRecord(foundRecords, dc, nil)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if changes == nil {
-		return nil, nil
+		return nil, 0, nil
 	}
 
 	// A DNS server should silently ignore a DDNS update that removes
@@ -635,5 +547,5 @@ func (c *axfrddnsProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, fo
 	if len(reports) > 0 {
 		returnValue = append(returnValue, c.BuildCorrection(dc, reports, nil))
 	}
-	return returnValue, nil
+	return returnValue, actualChangeCount, nil
 }

@@ -478,7 +478,7 @@ func (client *providerClient) clearRequests(domain string) error {
 	if cscDebug {
 		printer.Printf("DEBUG: Clearing requests for %q\n", domain)
 	}
-	var bodyString, err = client.get("/zones/edits?filter=zoneName==" + domain)
+	var bodyString, err = client.get(`/zones/edits?size=99999&filter=zoneName==` + domain)
 	if err != nil {
 		return err
 	}
@@ -486,10 +486,12 @@ func (client *providerClient) clearRequests(domain string) error {
 	var dr pagedZoneEditResponsePagedZoneEditResponse
 	json.Unmarshal(bodyString, &dr)
 
-	// TODO(tlim): Properly handle paganation.
-	if dr.Meta.Pages > 1 {
-		return fmt.Errorf("cancelPendingEdits failed: Pages=%d", dr.Meta.Pages)
-	}
+	// TODO(tlim): Ignore what's beyond the first page.
+	// It is unlikely that there are active jobs beyond the first page.
+	// If there are, the next edit will just wait.
+	//if dr.Meta.Pages > 1 {
+	//	return fmt.Errorf("cancelPendingEdits failed: Pages=%d", dr.Meta.Pages)
+	//}
 
 	for i, ze := range dr.ZoneEdits {
 		if cscDebug {
@@ -642,6 +644,12 @@ func (client *providerClient) geturl(url string) ([]byte, error) {
 	req.Header.Add("Authorization", "Bearer "+client.token)
 	req.Header.Add("Accept", "application/json")
 
+	// Default CSCGlobal rate limit is twenty requests per second
+	var backoff = time.Second
+
+	const maxBackoff = time.Second * 25
+
+retry:
 	resp, err := hclient.Do(req)
 	if err != nil {
 		return nil, err
@@ -654,6 +662,26 @@ func (client *providerClient) geturl(url string) ([]byte, error) {
 
 	if resp.StatusCode == 400 {
 		// 400, error message is in the body as plain text
+		// Apparently CSCGlobal uses status code 400 for rate limit, grump
+
+		if string(bodyString) == "Requests exceeded API Rate limit." {
+			// a simple exponential back-off with a 3-minute max.
+			if backoff > (time.Second * 10) {
+				// With this provider backups seem to be pretty common. Only
+				// announce it for long delays.
+				printer.Printf("Delaying %v due to ratelimit (CSCGLOBAL)\n", backoff)
+			}
+			time.Sleep(backoff)
+			backoff = backoff + (backoff / 2)
+			if backoff > maxBackoff {
+				return nil, fmt.Errorf("CSC Global API timeout max backoff (geturl): %s URL: %s%s",
+					bodyString,
+					req.Host, req.URL.RequestURI())
+			}
+
+			goto retry
+		}
+
 		return nil, fmt.Errorf("CSC Global API error (geturl): %s URL: %s%s",
 			bodyString,
 			req.Host, req.URL.RequestURI())

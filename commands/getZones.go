@@ -70,7 +70,7 @@ EXAMPLES:
    dnscontrol get-zones gmain GANDI_V5 example.com other.com
    dnscontrol get-zones cfmain CLOUDFLAREAPI all
    dnscontrol get-zones --format=tsv bind BIND example.com
-   dnscontrol get-zones --format=djs --out=draft.js glcoud GCLOUD example.com`,
+   dnscontrol get-zones --format=djs --out=draft.js gcloud GCLOUD example.com`,
 	}
 }())
 
@@ -147,7 +147,7 @@ func (args *GetZoneArgs) flags() []cli.Flag {
 	flags = append(flags, &cli.IntFlag{
 		Name:        "ttl",
 		Destination: &args.DefaultTTL,
-		Usage:       `Default TTL (0 picks the zone's most common TTL)`,
+		Usage:       `Default TTL (0 picks the most common TTL)`,
 	})
 	return flags
 }
@@ -220,7 +220,7 @@ func GetZone(args GetZoneArgs) error {
 			fmt.Fprintf(w, `var %s = NewDnsProvider("%s", "%s");`+"\n",
 				dspVariableName, args.CredName, args.ProviderName)
 		}
-		fmt.Fprintf(w, `var REG_CHANGEME = NewRegistrar("none");`+"\n")
+		fmt.Fprintf(w, `var REG_CHANGEME = NewRegistrar("none");`+"\n\n")
 	}
 
 	// print each zone
@@ -254,7 +254,7 @@ func GetZone(args GetZoneArgs) error {
 				if (rec.Type == "CNAME") && (rec.Name == "@") {
 					o = append(o, "// NOTE: CNAME at apex may require manual editing.")
 				}
-				o = append(o, formatDsl(zoneName, rec, defaultTTL))
+				o = append(o, formatDsl(rec, defaultTTL))
 			}
 			out := strings.Join(o, sep)
 
@@ -267,14 +267,17 @@ func GetZone(args GetZoneArgs) error {
 					"//,  NOTE: CNAME at apex may require manual editing.",
 					"// NOTE: CNAME at apex may require manual editing.",
 				)
+				fmt.Fprint(w, out)
+				fmt.Fprint(w, "\n)\n\n")
 			} else {
+				out = out + ","
 				out = strings.ReplaceAll(out,
 					"// NOTE: CNAME at apex may require manual editing.,",
 					"// NOTE: CNAME at apex may require manual editing.",
 				)
+				fmt.Fprint(w, out)
+				fmt.Fprint(w, "\nEND);\n\n")
 			}
-			fmt.Fprint(w, out)
-			fmt.Fprint(w, "\n)\n")
 
 		case "tsv":
 			for _, rec := range recs {
@@ -286,8 +289,12 @@ func GetZone(args GetZoneArgs) error {
 					}
 				}
 
+				ty := rec.Type
+				if rec.Type == "UNKNOWN" {
+					ty = rec.UnknownTypeName
+				}
 				fmt.Fprintf(w, "%s\t%s\t%d\tIN\t%s\t%s%s\n",
-					rec.NameFQDN, rec.Name, rec.TTL, rec.Type, rec.GetTargetCombined(), cfproxy)
+					rec.NameFQDN, rec.Name, rec.TTL, ty, rec.GetTargetCombinedFunc(nil), cfproxy)
 			}
 
 		default:
@@ -307,7 +314,7 @@ func jsonQuoted(i string) string {
 	return string(b)
 }
 
-func formatDsl(zonename string, rec *models.RecordConfig, defaultTTL uint32) string {
+func formatDsl(rec *models.RecordConfig, defaultTTL uint32) string {
 
 	target := rec.GetTargetCombined()
 
@@ -329,9 +336,11 @@ func formatDsl(zonename string, rec *models.RecordConfig, defaultTTL uint32) str
 	case "CAA":
 		return makeCaa(rec, ttlop)
 	case "DS":
-		target = fmt.Sprintf("%d, %d, %d, '%s'", rec.DsKeyTag, rec.DsAlgorithm, rec.DsDigestType, rec.DsDigest)
+		target = fmt.Sprintf(`%d, %d, %d, "%s"`, rec.DsKeyTag, rec.DsAlgorithm, rec.DsDigestType, rec.DsDigest)
+	case "DNSKEY":
+		target = fmt.Sprintf(`%d, %d, %d, "%s"`, rec.DnskeyFlags, rec.DnskeyProtocol, rec.DnskeyAlgorithm, rec.DnskeyPublicKey)
 	case "MX":
-		target = fmt.Sprintf("%d, '%s'", rec.MxPreference, rec.GetTargetField())
+		target = fmt.Sprintf(`%d, "%s"`, rec.MxPreference, rec.GetTargetField())
 	case "NAPTR":
 		target = fmt.Sprintf(`%d, %d, %s, %s, %s, %s`,
 			rec.NaptrOrder,                   // 1
@@ -342,61 +351,68 @@ func formatDsl(zonename string, rec *models.RecordConfig, defaultTTL uint32) str
 			jsonQuoted(rec.GetTargetField()), // .
 		)
 	case "SSHFP":
-		target = fmt.Sprintf("%d, %d, '%s'", rec.SshfpAlgorithm, rec.SshfpFingerprint, rec.GetTargetField())
+		target = fmt.Sprintf(`%d, %d, "%s"`, rec.SshfpAlgorithm, rec.SshfpFingerprint, rec.GetTargetField())
 	case "SOA":
 		rec.Type = "//SOA"
-		target = fmt.Sprintf("'%s', '%s', %d, %d, %d, %d, %d", rec.GetTargetField(), rec.SoaMbox, rec.SoaSerial, rec.SoaRefresh, rec.SoaRetry, rec.SoaExpire, rec.SoaMinttl)
+		target = fmt.Sprintf(`"%s", "%s", %d, %d, %d, %d, %d`, rec.GetTargetField(), rec.SoaMbox, rec.SoaSerial, rec.SoaRefresh, rec.SoaRetry, rec.SoaExpire, rec.SoaMinttl)
 	case "SRV":
-		target = fmt.Sprintf("%d, %d, %d, '%s'", rec.SrvPriority, rec.SrvWeight, rec.SrvPort, rec.GetTargetField())
+		target = fmt.Sprintf(`%d, %d, %d, "%s"`, rec.SrvPriority, rec.SrvWeight, rec.SrvPort, rec.GetTargetField())
+	case "SVCB", "HTTPS":
+		target = fmt.Sprintf(`%d, "%s", "%s"`, rec.SvcPriority, rec.GetTargetField(), rec.SvcParams)
 	case "TLSA":
-		target = fmt.Sprintf("%d, %d, %d, '%s'", rec.TlsaUsage, rec.TlsaSelector, rec.TlsaMatchingType, rec.GetTargetField())
+		target = fmt.Sprintf(`%d, %d, %d, "%s"`, rec.TlsaUsage, rec.TlsaSelector, rec.TlsaMatchingType, rec.GetTargetField())
 	case "TXT":
-		if len(rec.TxtStrings) == 1 {
-			target = `'` + rec.TxtStrings[0] + `'`
-		} else {
-			target = `['` + strings.Join(rec.TxtStrings, `', '`) + `']`
-		}
+		target = jsonQuoted(rec.GetTargetTXTJoined())
 		// TODO(tlim): If this is an SPF record, generate a SPF_BUILDER().
 	case "NS":
 		// NS records at the apex should be NAMESERVER() records.
 		// DnsControl uses the API to get this info. NAMESERVER() is just
 		// to override that when needed.
 		if rec.Name == "@" {
-			return fmt.Sprintf("//NAMESERVER('%s')", target)
+			return fmt.Sprintf(`//NAMESERVER("%s")`, target)
 		}
-		target = "'" + target + "'"
+		target = `"` + target + `"`
 	case "R53_ALIAS":
 		return makeR53alias(rec, ttl)
+	case "UNKNOWN":
+		return makeUknown(rec, ttl)
 	default:
-		target = "'" + target + "'"
+		target = `"` + target + `"`
 	}
 
-	return fmt.Sprintf("%s('%s', %s%s%s)", rec.Type, rec.Name, target, cfproxy, ttlop)
+	return fmt.Sprintf(`%s("%s", %s%s%s)`, rec.Type, rec.Name, target, cfproxy, ttlop)
 }
 
 func makeCaa(rec *models.RecordConfig, ttlop string) string {
 	var target string
 	if rec.CaaFlag == 128 {
-		target = fmt.Sprintf("'%s', '%s', CAA_CRITICAL", rec.CaaTag, rec.GetTargetField())
+		target = fmt.Sprintf(`"%s", "%s", CAA_CRITICAL`, rec.CaaTag, rec.GetTargetField())
 	} else {
-		target = fmt.Sprintf("'%s', '%s'", rec.CaaTag, rec.GetTargetField())
+		target = fmt.Sprintf(`"%s", "%s"`, rec.CaaTag, rec.GetTargetField())
 	}
-	return fmt.Sprintf("%s('%s', %s%s)", rec.Type, rec.Name, target, ttlop)
+	return fmt.Sprintf(`%s("%s", %s%s)`, rec.Type, rec.Name, target, ttlop)
 
 	// TODO(tlim): Generate a CAA_BUILDER() instead?
 }
 
 func makeR53alias(rec *models.RecordConfig, ttl uint32) string {
 	items := []string{
-		"'" + rec.Name + "'",
-		"'" + rec.R53Alias["type"] + "'",
-		"'" + rec.GetTargetField() + "'",
+		`"` + rec.Name + `"`,
+		`"` + rec.R53Alias["type"] + `"`,
+		`"` + rec.GetTargetField() + `"`,
 	}
 	if z, ok := rec.R53Alias["zone_id"]; ok {
-		items = append(items, "R53_ZONE('"+z+"')")
+		items = append(items, `R53_ZONE("`+z+`")`)
+	}
+	if e, ok := rec.R53Alias["evaluate_target_health"]; ok && e == "true" {
+		items = append(items, "R53_EVALUATE_TARGET_HEALTH(true)")
 	}
 	if ttl != 0 {
 		items = append(items, fmt.Sprintf("TTL(%d)", ttl))
 	}
 	return rec.Type + "(" + strings.Join(items, ", ") + ")"
+}
+
+func makeUknown(rc *models.RecordConfig, ttl uint32) string {
+	return fmt.Sprintf(`// %s("%s", TTL(%d))`, rc.UnknownTypeName, rc.GetTargetField(), ttl)
 }

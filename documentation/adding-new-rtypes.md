@@ -16,7 +16,7 @@ Our general philosophy is:
 -   Anywhere we have a special case for a particular Rtype, we use a `switch` statement and have a `case` for every single record type, usually with a `default:` case that calls `panic()`. This way developers adding a new record type will quickly find where they need to add code (the panic will tell them where). Before we did this, missing implementation code would go unnoticed for months.
 -   Keep things alphabetical. If you are adding your record type to a case statement, function library, or whatever, please list it alphabetically along with the others when possible.
 
-Step 2 requires `stringer`. 
+Step 2 requires `stringer`.
 ```shell
 go install golang.org/x/tools/cmd/stringer@latest
 ```
@@ -73,15 +73,15 @@ popd
 ```
 
 -   Add this feature to the feature matrix in `dnscontrol/build/generate/featureMatrix.go`. Add it to the variable `matrix` maintaining alphabetical ordering, which should look like this:
-    
+
     {% code title="dnscontrol/build/generate/featureMatrix.go" %}
     ```diff
     func matrixData() *FeatureMatrix {
         const (
             ...
-            DomainModifierCaa    = "[`CAA`](functions/domain/CAA.md)"
-    +       DomainModifierFoo    = "[`FOO`](functions/domain/FOO.md)"
-            DomainModifierLoc    = "[`LOC`](functions/domain/LOC.md)"
+            DomainModifierCaa    = "[`CAA`](language-reference/domain-modifiers/CAA.md)"
+    +       DomainModifierFoo    = "[`FOO`](language-reference/domain-modifiers/FOO.md)"
+            DomainModifierLoc    = "[`LOC`](language-reference/domain-modifiers/LOC.md)"
             ...
         )
         matrix := &FeatureMatrix{
@@ -98,7 +98,7 @@ popd
     {% endcode %}
 
     then add it later in the file with a `setCapability()` statement, which should look like this:
-    
+
     {% code title="dnscontrol/build/generate/featureMatrix.go" %}
     ```diff
     ...
@@ -153,7 +153,7 @@ example we removed `providers.CanUseCAA` from the
 
 Add a function to `pkg/js/helpers.js` for the new record type. This
 is the JavaScript file that defines `dnsconfig.js`'s functions like
-[`A()`](functions/domain/A.md) and [`MX()`](functions/domain/MX.md). Look at the definition of `A`, `MX` and `CAA` for good
+[`A()`](language-reference/domain-modifiers/A.md) and [`MX()`](language-reference/domain-modifiers/MX.md). Look at the definition of `A`, `MX` and `CAA` for good
 examples to use as a base.
 
 Please add the function alphabetically with the others. Also, please run
@@ -252,7 +252,7 @@ in the source code.
 To run the integration test with the BIND provider:
 
 ```shell
-cd integrationTest/
+cd integrationTest              # NOTE: Not needed if already in that subdirectory
 go test -v -verbose -provider BIND
 ```
 
@@ -275,6 +275,7 @@ For example, this will run the tests on Amazon AWS Route53:
 export R53_DOMAIN=dnscontroltest-r53.com  # Use a test domain.
 export R53_KEY_ID=CHANGE_TO_THE_ID
 export R53_KEY='CHANGE_TO_THE_KEY'
+cd integrationTest              # NOTE: Not needed if already in that subdirectory
 go test -v -verbose -provider ROUTE53
 ```
 
@@ -291,7 +292,7 @@ tests, please ask!
 
 ## Step 8: Write documentation
 
-Add a new Markdown file to `documentation/functions/domain`. Copy an existing file (`CNAME.md` is a good example). The section between the lines of `---` is called the front matter and it has the following keys:
+Add a new Markdown file to `documentation/language-reference/domain-modifiers`. Copy an existing file (`CNAME.md` is a good example). The section between the lines of `---` is called the front matter and it has the following keys:
 
 -   `name`: The name of the record. This should match the file name and the name of the record in `helpers.js`.
 -   `parameters`: A list of parameter names, in order. Feel free to use spaces in the name if necessary. Your last parameter should be `modifiers...` to allow arbitrary modifiers like `TTL` to be applied to your record.
@@ -306,24 +307,34 @@ Add the new file `FOO.md` to the documentation table of contents [`documentation
 ...
 * Domain Modifiers
 ...
-    * [DnsProvider](functions/domain/DnsProvider.md)
-+   * [FOO](functions/domain/FOO.md)
-    * [FRAME](functions/domain/FRAME.md)
+    * [DnsProvider](language-reference/domain-modifiers/DnsProvider.md)
++   * [FOO](language-reference/domain-modifiers/FOO.md)
+    * [FRAME](language-reference/domain-modifiers/FRAME.md)
 ...
     * Service Provider specific
 ...
         * ClouDNS
-            * [CLOUDNS_WR](functions/domain/CLOUDNS_WR.md)
+            * [CLOUDNS_WR](language-reference/domain-modifiers/CLOUDNS_WR.md)
 +       * ASDF
-+           * [NINJA_RECORD](function/domain/FOO_NINJA.md)
++           * [ASDF_NINJA](language-reference/domain-modifiers/ASDF_NINJA.md)
         * NS1
-            * [NS1_URLFWD](functions/domain/NS1_URLFWD.md)
+            * [NS1_URLFWD](language-reference/domain-modifiers/NS1_URLFWD.md)
 ...
 * Record Modifiers
 ...
-    * [DMARC_BUILDER](functions/record/DMARC_BUILDER.md)
-+   * [FOO_HELPER](functions/record/FOO_HELPER.md)
-    * [SPF_BUILDER](functions/record/SPF_BUILDER.md)
+    * [DMARC_BUILDER](language-reference/domain-modifiers/DMARC_BUILDER.md)
++   * [FOO_HELPER](language-reference/record-modifiers/FOO_HELPER.md)
+    * [SPF_BUILDER](language-reference/domain-modifiers/SPF_BUILDER.md)
 ...
 ```
 {% endcode %}
+
+## Step 9: "go generate"
+
+Re-generate the documentation:
+
+```shell
+go generate ./...
+```
+
+This will regenerate things like the table of which providers have which features and the `dnscontrol.d.ts` file.

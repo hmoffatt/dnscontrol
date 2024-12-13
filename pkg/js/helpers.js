@@ -104,6 +104,7 @@ function newDomain(name, registrar) {
         registrar: registrar,
         meta: {},
         records: [],
+        rawrecords: [],
         recordsabsent: [],
         dnsProviders: {},
         defaultTTL: 0,
@@ -328,8 +329,14 @@ var R53_ALIAS = recordBuilder('R53_ALIAS', {
         record.target = args.target;
         if (_.isObject(record.r53_alias)) {
             record.r53_alias['type'] = args.type;
+            if (!_.isString(record.r53_alias['evaluate_target_health'])) {
+                record.r53_alias['evaluate_target_health'] = 'false';
+            }
         } else {
-            record.r53_alias = { type: args.type };
+            record.r53_alias = {
+                type: args.type,
+                evaluate_target_health: 'false',
+            };
         }
     },
 });
@@ -343,6 +350,17 @@ function R53_ZONE(zone_id) {
             r.r53_alias['zone_id'] = zone_id;
         } else {
             r.r53_alias = { zone_id: zone_id };
+        }
+    };
+}
+
+// R53_EVALUATE_TARGET_HEALTH(enabled)
+function R53_EVALUATE_TARGET_HEALTH(enabled) {
+    return function (r) {
+        if (_.isObject(r.r53_alias)) {
+            r.r53_alias['evaluate_target_health'] = enabled.toString();
+        } else {
+            r.r53_alias = { evaluate_target_health: enabled.toString() };
         }
     };
 }
@@ -404,6 +422,47 @@ var DS = recordBuilder('DS', {
         record.dsdigesttype = args.digesttype;
         record.dsdigest = args.digest;
         record.target = args.target;
+    },
+});
+
+// DHCID(name,target, recordModifiers...)
+var DHCID = recordBuilder('DHCID');
+
+// DNAME(name,target, recordModifiers...)
+var DNAME = recordBuilder('DNAME');
+
+// DNSKEY(name, flags, protocol, algorithm, publickey)
+var DNSKEY = recordBuilder('DNSKEY', {
+    args: [
+        ['name', _.isString],
+        ['flags', _.isNumber],
+        ['protocol', _.isNumber],
+        ['algorithm', _.isNumber],
+        ['publickey', _.isString],
+    ],
+    transform: function (record, args, modifiers) {
+        record.name = args.name;
+        record.dnskeyflags = args.flags;
+        record.dnskeyprotocol = args.protocol;
+        record.dnskeyalgorithm = args.algorithm;
+        record.dnskeypublickey = args.publickey;
+        record.target = args.target;
+    },
+});
+
+// name, priority, target, params
+var HTTPS = recordBuilder('HTTPS', {
+    args: [
+        ['name', _.isString],
+        ['priority', _.isNumber],
+        ['target', _.isString],
+        ['params', _.isString],
+    ],
+    transform: function (record, args, modifiers) {
+        record.name = args.name;
+        record.svcpriority = args.priority;
+        record.target = args.target;
+        record.svcparams = args.params;
     },
 });
 
@@ -488,6 +547,22 @@ var SSHFP = recordBuilder('SSHFP', {
     },
 });
 
+// name, priority, target, params
+var SVCB = recordBuilder('SVCB', {
+    args: [
+        ['name', _.isString],
+        ['priority', _.isNumber],
+        ['target', _.isString],
+        ['params', _.isString],
+    ],
+    transform: function (record, args, modifiers) {
+        record.name = args.name;
+        record.svcpriority = args.priority;
+        record.target = args.target;
+        record.svcparams = args.params;
+    },
+});
+
 // name, usage, selector, matchingtype, certificate
 var TLSA = recordBuilder('TLSA', {
     args: [
@@ -523,11 +598,9 @@ var TXT = recordBuilder('TXT', {
         record.name = args.name;
         // Store the strings from the user verbatim.
         if (_.isString(args.target)) {
-            record.txtstrings = [args.target];
-            record.target = args.target; // Overwritten by the Go code
+            record.target = args.target;
         } else {
-            record.txtstrings = args.target;
-            record.target = args.target.join(''); // Overwritten by the Go code
+            record.target = args.target.join('');
         }
     },
 });
@@ -610,10 +683,33 @@ function getENotationInt(x) {
        0cm = 0e0 == 0
     */
     size = x * 100; // get cm value
-    // get the m^e version of size
-    array = size.toExponential(0).split('e+').map(Number);
+
+    // Convert the number to scientific notation
+    var exp = Math.floor(Math.log10(size)); // Get the exponent (base 10)
+    var mantissa = size / Math.pow(10, exp); // Normalize mantissa
+
+    // Normalize the mantissa to fit into 4 bits (between 0 and 15)
+    while (mantissa < 1 && exp > 0) {
+        mantissa *= 10;
+        exp -= 1;
+    }
+
+    /* Four-bit values greater than 9 are undefined, as are values with a base
+    of zero and a non-zero exponent.
+    */
+
+    // Ensure mantissa and exponent are within 4-bit range (0-15) but no greater than 9
+    mantissa = Math.floor(mantissa); // We truncate decimals
+    if (mantissa > 9) {
+        mantissa = 9; // Cap mantissa at 9
+    }
+    if (exp < 0) {
+        exp = 0; // We cap negative exponents at 0
+    } else if (exp > 9) {
+        exp = 9; // Cap exponent at 9
+    }
     // convert it to 4bit:4bit uint8
-    m_e = (array[0] << 4) | array[1];
+    m_e = (mantissa << 4) | (exp & 0xf);
     return m_e;
 }
 
@@ -662,10 +758,30 @@ function locStringBuilder(record, args) {
     }
 
     // handle altitude, size, horizontal precision, vertical precision
-    precisionbuffer = args.alt.toString() + 'm';
-    precisionbuffer += ' ' + args.siz.toString() + 'm';
-    precisionbuffer += ' ' + args.hp.toString() + 'm';
-    precisionbuffer += ' ' + args.vp.toString() + 'm';
+    // alt -100000.00 .. 42849672.95m
+    // size, horizontal precision, vertical precision 0 .. 90000000.00m
+    precisionbuffer =
+        (args.alt < -100000
+            ? -100000
+            : args.alt > 42849672.95
+              ? 42849672.95
+              : args.alt.toString()) + 'm';
+    precisionbuffer +=
+        ' ' +
+        (args.siz > 90000000
+            ? 90000000
+            : args.siz < 0
+              ? 0
+              : args.siz.toString()) +
+        'm';
+    precisionbuffer +=
+        ' ' +
+        (args.hp > 90000000 ? 90000000 : args.hp < 0 ? 0 : args.hp.toString()) +
+        'm';
+    precisionbuffer +=
+        ' ' +
+        (args.vp > 90000000 ? 90000000 : args.vp < 0 ? 0 : args.vp.toString()) +
+        'm';
 
     record.target = nsstring + ewstring + precisionbuffer;
 
@@ -690,23 +806,23 @@ function locDMSBuilder(record, args) {
     // W
     else record.loclongitude = LOCPrimeMeridian - lon;
     // Altitude
-    record.localtitude = (args.alt + LOCAltitudeBase) * 100;
+    record.localtitude = parseInt((args.alt + LOCAltitudeBase) * 100);
+    // 'cast' altitude to fit 'uint32'
+    record.localtitude =
+        record.localtitude > 4294967295
+            ? 4294967295
+            : record.localtitude < 0
+              ? 0
+              : record.localtitude;
     // Size
     record.locsize = getENotationInt(args.siz);
     // Horizontal Precision
     m_e = args.hp;
     record.lochorizpre = getENotationInt(args.hp);
-    // if (m_e != 0) {
-    // } else {
-    //     record.lochorizpre = 22; // 10,000m default
-    // }
+
     // Vertical Precision
     m_e = args.vp;
     record.locvertpre = getENotationInt(args.vp);
-    // if (m_e != 0) {
-    // } else {
-    //     record.lochorizpre = 19; // 10m default
-    // }
 }
 
 // LOC(name,d1,m1,s1,ns,d2,m2,s2,ew,alt,siz,hp,vp, recordModifiers...)
@@ -727,10 +843,68 @@ var LOC = recordBuilder('LOC', {
         ['vp', _.isNumber], // vertical precision
     ],
     transform: function (record, args, modifiers) {
+        validateIntegers(args);
+
         record = locStringBuilder(record, args);
         record = locDMSBuilder(record, args);
     },
 });
+
+// Post-validation function for LOC that checks if degrees and minutes are integers
+function validateIntegers(args) {
+    if (args.d1 % 1 !== 0) {
+        throw (
+            "Degrees N/S shall be an integer: record '" +
+            args.name +
+            "': *" +
+            args.d1 +
+            '*, ' +
+            args.m1 +
+            ', ' +
+            args.s1 +
+            ', ...'
+        );
+    }
+    if (args.m1 % 1 !== 0) {
+        throw (
+            "Minutes N/S shall be an integer: record '" +
+            args.name +
+            "': " +
+            args.d1 +
+            ', *' +
+            args.m1 +
+            '*, ' +
+            args.s1 +
+            ', ...'
+        );
+    }
+    if (args.d2 % 1 !== 0) {
+        throw (
+            "Degrees E/W shall be an integer: record '" +
+            args.name +
+            "': *" +
+            args.d2 +
+            '*, ' +
+            args.m2 +
+            ', ' +
+            args.s2 +
+            ', ...'
+        );
+    }
+    if (args.m2 % 1 !== 0) {
+        throw (
+            "Minutes E/W shall be an integer: record '" +
+            args.name +
+            "': " +
+            args.d2 +
+            ', *' +
+            args.m2 +
+            '*, ' +
+            args.s2 +
+            ', ...'
+        );
+    }
+}
 
 function ConvertDDToDMS(D, longitude) {
     //stackoverflow, baby. do not re-order the rows.
@@ -828,16 +1002,6 @@ function DISABLE_IGNORE_SAFETY_CHECK(d) {
     d.unmanaged_disable_safety_check = true;
 }
 
-var IGNORE_NAME_DISABLE_SAFETY_CHECK = {
-    ignore_name_disable_safety_check: 'true',
-    // (NOTE: diff1 only.)
-    // This disables a safety check intended to prevent:
-    // 1. Two owners toggling a record between two settings.
-    // 2. The other owner wiping all records at this label, which won't
-    // be noticed until the next time dnscontrol is run.
-    // See https://github.com/StackExchange/dnscontrol/issues/1106
-};
-
 // IGNORE(labelPattern, rtypePattern, targetPattern)
 function IGNORE(labelPattern, rtypePattern, targetPattern) {
     if (labelPattern === undefined) {
@@ -850,9 +1014,6 @@ function IGNORE(labelPattern, rtypePattern, targetPattern) {
         targetPattern = '*';
     }
     return function (d) {
-        // diff1
-        d.ignored_names.push({ pattern: labelPattern, types: rtypePattern });
-        // diff2
         d.unmanaged.push({
             label_pattern: labelPattern,
             rType_pattern: rtypePattern,
@@ -863,33 +1024,14 @@ function IGNORE(labelPattern, rtypePattern, targetPattern) {
 
 // IGNORE_NAME(name, rTypes)
 function IGNORE_NAME(name, rTypes) {
-    if (rTypes === undefined) {
-        rTypes = '*';
-    }
-    return function (d) {
-        // diff1
-        d.ignored_names.push({ pattern: name, types: rTypes });
-        // diff2
-        d.unmanaged.push({
-            label_pattern: name,
-            rType_pattern: rTypes,
-        });
-    };
+    return IGNORE(name, rTypes);
 }
 
 function IGNORE_TARGET(target, rType) {
-    return function (d) {
-        // diff1
-        d.ignored_targets.push({ pattern: target, type: rType });
-        // diff2
-        d.unmanaged.push({
-            rType_pattern: rType,
-            target_pattern: target,
-        });
-    };
+    return IGNORE('*', rType, target);
 }
 
-// IMPORT_TRANSFORM(translation_table, domain)
+// IMPORT_TRANSFORM(translation_table, domain, ttl)
 var IMPORT_TRANSFORM = recordBuilder('IMPORT_TRANSFORM', {
     args: [['translation_table'], ['domain'], ['ttl', _.isNumber]],
     transform: function (record, args, modifiers) {
@@ -897,6 +1039,23 @@ var IMPORT_TRANSFORM = recordBuilder('IMPORT_TRANSFORM', {
         record.target = args.domain;
         record.meta['transform_table'] = format_tt(args.translation_table);
         record.ttl = args.ttl;
+    },
+});
+
+// IMPORT_TRANSFORM_STRIP(translation_table, domain, ttl, suffixstrip)
+var IMPORT_TRANSFORM_STRIP = recordBuilder('IMPORT_TRANSFORM', {
+    args: [
+        ['translation_table'],
+        ['domain'],
+        ['ttl', _.isNumber],
+        ['suffixstrip'],
+    ],
+    transform: function (record, args, modifiers) {
+        record.name = '@';
+        record.target = args.domain;
+        record.meta['transform_table'] = format_tt(args.translation_table);
+        record.ttl = args.ttl;
+        record.meta['transform_suffixstrip'] = args.suffixstrip;
     },
 });
 
@@ -1057,6 +1216,7 @@ function recordBuilder(type, opts) {
             // Handle D_EXTEND() with subdomains.
             if (
                 d.subdomain &&
+                record.type != 'CF_SINGLE_REDIRECT' &&
                 record.type != 'CF_REDIRECT' &&
                 record.type != 'CF_TEMP_REDIRECT' &&
                 record.type != 'CF_WORKER_ROUTE'
@@ -1218,6 +1378,7 @@ var URL301 = recordBuilder('URL301');
 var FRAME = recordBuilder('FRAME');
 var NS1_URLFWD = recordBuilder('NS1_URLFWD');
 var CLOUDNS_WR = recordBuilder('CLOUDNS_WR');
+var PORKBUN_URLFWD = recordBuilder('PORKBUN_URLFWD');
 
 // LOC_BUILDER_DD takes an object:
 // label: The DNS label for the LOC record. (default: '@')
@@ -1463,6 +1624,7 @@ function SPF_BUILDER(value) {
 // iodef_critical: Boolean if sending report is required/critical. If not supported, certificate should be refused. (optional)
 // issue: List of CAs which are allowed to issue certificates for the domain (creates one record for each).
 // issuewild: Allowed CAs which can issue wildcard certificates for this domain. (creates one record for each)
+// ttl: The time for TTL, integer or string. (default: not defined, using DefaultTTL)
 
 function CAA_BUILDER(value) {
     if (!value.label) {
@@ -1482,23 +1644,41 @@ function CAA_BUILDER(value) {
         throw 'CAA_BUILDER requires at least one entry at issue or issuewild';
     }
 
+    var CAA_TTL = function () {};
+    if (value.ttl) {
+        CAA_TTL = TTL(value.ttl);
+    }
     r = []; // The list of records to return.
 
     if (value.iodef) {
         if (value.iodef_critical) {
-            r.push(CAA(value.label, 'iodef', value.iodef, CAA_CRITICAL));
+            r.push(
+                CAA(value.label, 'iodef', value.iodef, CAA_CRITICAL, CAA_TTL)
+            );
         } else {
-            r.push(CAA(value.label, 'iodef', value.iodef));
+            r.push(CAA(value.label, 'iodef', value.iodef, CAA_TTL));
         }
     }
 
-    if (value.issue)
+    if (value.issue) {
+        var flag = function () {};
+        if (value.issue_critical) {
+            flag = CAA_CRITICAL;
+        }
         for (var i = 0, len = value.issue.length; i < len; i++)
-            r.push(CAA(value.label, 'issue', value.issue[i]));
+            r.push(CAA(value.label, 'issue', value.issue[i], flag, CAA_TTL));
+    }
 
-    if (value.issuewild)
+    if (value.issuewild) {
+        var flag = function () {};
+        if (value.issuewild_critical) {
+            flag = CAA_CRITICAL;
+        }
         for (var i = 0, len = value.issuewild.length; i < len; i++)
-            r.push(CAA(value.label, 'issuewild', value.issuewild[i]));
+            r.push(
+                CAA(value.label, 'issuewild', value.issuewild[i], flag, CAA_TTL)
+            );
+    }
 
     return r;
 }
@@ -1687,7 +1867,7 @@ function M365_BUILDER(name, value) {
             );
         }
 
-        value.domainGUID = name.replace('.', '-');
+        value.domainGUID = name.replace(/\./g, '-');
     }
 
     if (value.dkim && !value.initialDomain) {
@@ -1697,7 +1877,7 @@ function M365_BUILDER(name, value) {
         );
     }
 
-    r = [];
+    var r = [];
 
     // MX (default: true)
     if (value.mx) {
@@ -1794,7 +1974,7 @@ function DKIM(arr) {
 function require_glob() {
     arguments[2] = 'js'; // force to only include .js files.
     var files = glob.apply(null, arguments);
-    for (i = 0; i < files.length; i++) {
+    for (var i = 0; i < files.length; i++) {
         require(files[i]);
     }
     return files;
@@ -1824,7 +2004,7 @@ function DOMAIN_ELSEWHERE(domain, registrar, nslist) {
     // NB(tlim): NO_PURGE is added as a precaution since something else
     // is maintaining the DNS records in that zone.  In theory this is
     // not needed since this domain won't have a DSP defined.
-    for (i = 0; i < nslist.length; i++) {
+    for (var i = 0; i < nslist.length; i++) {
         D_EXTEND(domain, NAMESERVER(nslist[i]));
     }
 }
@@ -1837,7 +2017,7 @@ function DOMAIN_ELSEWHERE_AUTO(domain, registrar, dsplist) {
     // NB(tlim): NO_PURGE is required since something else
     // is maintaining the DNS records in that zone, and we have access
     // to updating it (but we don't want to use it.)
-    for (i = 2; i < arguments.length; i++) {
+    for (var i = 2; i < arguments.length; i++) {
         D_EXTEND(domain, DnsProvider(arguments[i]));
     }
 }
@@ -1856,3 +2036,70 @@ var DISABLE_REPEATED_DOMAIN_CHECK = { skip_fqdn_check: 'true' };
 // D("bar.com", ...
 //     A("foo.bar.com", "10.1.1.1", DISABLE_REPEATED_DOMAIN_CHECK),
 // )
+
+// ============================================================
+
+// RTYPES
+
+// Background:
+// Old-style commands: Commands built using recordBuild() are the original
+// style.  They all validation and pre-processing here in helpers.js. This
+// seemed like a good idea at the time, but in hindsight it puts a burden on the
+// developer to know both Javascript and go.
+
+// New-style commands: Command built using rawrecordBuilder() are the new style.
+// They simply pack up the arguments listed in dnsconfig.js and store them in
+// .rawrecords. This is passed to the Go code, which is responsible for all
+// validation, pre-processing, etc.  The benefit is this minimizes the need for
+// Javascript knowledge, and allows us to use the testing platform build into
+// Go.
+
+function rawrecordBuilder(type) {
+    return function () {
+        // Copy the raw args:
+        var rawArgs = [];
+        for (var i = 0; i < arguments.length; i++) {
+            rawArgs.push(arguments[i]);
+        }
+
+        return function (d) {
+            var record = {
+                type: type,
+            };
+
+            // Process the args: Functions are executed, objects are assumed to
+            // be meta and stored, strings are assumed to be args and are
+            // stored.
+            // NB(tlim): Allowing for the intermixing of args and meta seems
+            // bad.  It might be better to simply preserve the first n items as
+            // args, then assume the rest are metas. That would be more similar
+            // to the old style functions. However at this time I can't think of
+            // a reason this isn't sufficient.
+            var processedArgs = [];
+            var processedMetas = [];
+            for (var i = 0; i < rawArgs.length; i++) {
+                var r = rawArgs[i];
+                if (_.isFunction(r)) {
+                    r(record);
+                } else if (_.isObject(r)) {
+                    processedMetas.push(r);
+                } else {
+                    processedArgs.push(r);
+                }
+            }
+            // Store the processed args.
+            record.args = processedArgs;
+            record.metas = processedMetas;
+
+            // Add this raw record to the list of records.
+            d.rawrecords.push(record);
+
+            return record;
+        };
+    };
+}
+
+// PLEASE KEEP THIS LIST ALPHABETICAL!
+
+// CLOUDFLAREAPI:
+var CF_SINGLE_REDIRECT = rawrecordBuilder('CLOUDFLAREAPI_SINGLE_REDIRECT');

@@ -7,14 +7,15 @@ import (
 
 	"github.com/StackExchange/dnscontrol/v4/models"
 	"github.com/StackExchange/dnscontrol/v4/pkg/diff"
-	"github.com/StackExchange/dnscontrol/v4/pkg/diff2"
-	"github.com/StackExchange/dnscontrol/v4/pkg/txtutil"
 	"github.com/StackExchange/dnscontrol/v4/providers"
 )
 
 var features = providers.DocumentationNotes{
+	// The default for unlisted capabilities is 'Cannot'.
+	// See providers/capabilities.go for the entire list of capabilities.
 	providers.CanAutoDNSSEC:          providers.Cannot(),
 	providers.CanGetZones:            providers.Can(),
+	providers.CanConcur:              providers.Can(),
 	providers.CanUseAlias:            providers.Cannot(),
 	providers.CanUseCAA:              providers.Can(),
 	providers.CanUseDS:               providers.Can(),
@@ -32,11 +33,14 @@ var features = providers.DocumentationNotes{
 }
 
 func init() {
+	const providerName = "HETZNER"
+	const providerMaintainer = "@das7pad"
 	fns := providers.DspFuncs{
 		Initializer:   New,
 		RecordAuditor: AuditRecords,
 	}
-	providers.RegisterDomainServiceProviderType("HETZNER", fns, features)
+	providers.RegisterDomainServiceProviderType(providerName, fns, features)
+	providers.RegisterMaintainer(providerName, providerMaintainer)
 }
 
 // New creates a new API handle.
@@ -64,35 +68,29 @@ func (api *hetznerProvider) EnsureZoneExists(domain string) error {
 		}
 	}
 
-	// reset zone cache
-	api.zones = nil
-	return api.createZone(domain)
+	if err = api.createZone(domain); err != nil {
+		return err
+	}
+	api.resetZoneCache()
+	return nil
 }
 
 // GetZoneRecordsCorrections returns a list of corrections that will turn existing records into dc.Records.
-func (api *hetznerProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, existingRecords models.Records) ([]*models.Correction, error) {
+func (api *hetznerProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, existingRecords models.Records) ([]*models.Correction, int, error) {
 	domain := dc.Name
 
-	txtutil.SplitSingleLongTxt(dc.Records) // Autosplit long TXT records
-
-	var corrections []*models.Correction
-	var differ diff.Differ
-	if !diff2.EnableDiff2 {
-		differ = diff.New(dc)
-	} else {
-		differ = diff.NewCompat(dc)
-	}
-	_, create, del, modify, err := differ.IncrementalDiff(existingRecords)
+	toReport, create, del, modify, actualChangeCount, err := diff.NewCompat(dc).IncrementalDiff(existingRecords)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
+	// Start corrections with the reports
+	corrections := diff.GenerateMessageCorrections(toReport)
 
 	z, err := api.getZone(domain)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
-	corrections = make([]*models.Correction, 0, len(del)+1+1)
 	for _, m := range del {
 		r := m.Existing.Original.(*record)
 		corr := &models.Correction{
@@ -140,7 +138,7 @@ func (api *hetznerProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, e
 		corrections = append(corrections, corr)
 	}
 
-	return corrections, nil
+	return corrections, actualChangeCount, nil
 }
 
 // GetNameservers returns the nameservers for a domain.
@@ -171,12 +169,13 @@ func (api *hetznerProvider) GetZoneRecords(domain string, meta map[string]string
 
 // ListZones lists the zones on this account.
 func (api *hetznerProvider) ListZones() ([]string, error) {
-	if err := api.getAllZones(); err != nil {
+	zones, err := api.getAllZones()
+	if err != nil {
 		return nil, err
 	}
-	zones := make([]string, 0, len(api.zones))
-	for domain := range api.zones {
-		zones = append(zones, domain)
+	domains := make([]string, 0, len(zones))
+	for domain := range zones {
+		domains = append(domains, domain)
 	}
-	return zones, nil
+	return domains, nil
 }

@@ -1,7 +1,6 @@
 # DNSControl
 
-[![StackExchange/dnscontrol/build](https://github.com/StackExchange/dnscontrol/actions/workflows/build.yml/badge.svg)](https://github.com/StackExchange/dnscontrol/actions/workflows/build.yml)
-[![Gitter chat](https://badges.gitter.im/dnscontrol/Lobby.png)](https://gitter.im/dnscontrol/Lobby)
+[![StackExchange/dnscontrol/build](https://github.com/StackExchange/dnscontrol/actions/workflows/pr_test.yml/badge.svg)](https://github.com/StackExchange/dnscontrol/actions/workflows/pr_test.yml)
 [![Google Group](https://img.shields.io/badge/google%20group-chat-green.svg)](https://groups.google.com/forum/#!forum/dnscontrol-discuss)
 [![PkgGoDev](https://pkg.go.dev/badge/github.com/StackExchange/dnscontrol)](https://pkg.go.dev/github.com/StackExchange/dnscontrol/v4)
 
@@ -21,9 +20,12 @@ Currently supported DNS providers:
 - AWS Route 53
 - AXFR+DDNS
 - Azure DNS
+- Azure Private DNS
 - BIND
+- Bunny DNS
 - Cloudflare
 - ClouDNS
+- CentralNic Reseller (CNR) - formerly RRPProxy
 - deSEC
 - DigitalOcean
 - DNS Made Easy
@@ -36,12 +38,14 @@ Currently supported DNS providers:
 - Hetzner
 - HEXONET
 - hosting.de
+- Huawei Cloud DNS
 - Hurricane Electric DNS
 - INWX
 - Linode
 - Loopia
 - LuaDNS
 - Microsoft Windows Server DNS Server
+- Mythic Beasts
 - Namecheap
 - Name.com
 - Netcup
@@ -52,7 +56,9 @@ Currently supported DNS providers:
 - Packetframe
 - Porkbun
 - PowerDNS
+- Realtime Register
 - RWTH DNS-Admin
+- Sakura Cloud
 - SoftLayer
 - TransIP
 - Vultr
@@ -61,7 +67,9 @@ Currently supported Domain Registrars:
 
 - AWS Route 53
 - CSC Global
+- CentralNic Reseller (formerly RRPProxy)
 - DNSOVERHTTPS
+- Dynadot
 - easyname
 - Gandi
 - HEXONET
@@ -72,6 +80,7 @@ Currently supported Domain Registrars:
 - Name.com
 - OpenSRS
 - OVH
+- Realtime Register
 
 At Stack Overflow, we use this system to manage hundreds of domains
 and subdomains across multiple registrars and DNS providers.
@@ -103,7 +112,13 @@ Running `dnscontrol preview` will talk to the providers (here name.com as regist
 
 Running `dnscontrol push` will make those changes with the provider and my dns records will be correctly updated.
 
-See [Getting Started](https://docs.dnscontrol.org/getting-started/getting-started) page on documentation site.
+The easiest way to run DNSControl is to use the Docker container:
+
+```
+docker run --rm -it -v "$(pwd):/dns"  ghcr.io/stackexchange/dnscontrol preview
+```
+
+See [Getting Started](https://docs.dnscontrol.org/getting-started/getting-started) page on documentation site to get started!
 
 ## Benefits
 
@@ -146,14 +161,19 @@ DNSControl can be installed via packages for macOS, Linux and Windows, or from s
 
 See [dnscontrol-action](https://github.com/koenrh/dnscontrol-action) or [gacts/install-dnscontrol](https://github.com/gacts/install-dnscontrol).
 
-## Deprecation warnings (updated 2023-02-18)
+## Deprecation warnings (updated 2024-03-25)
 
-- **Call for new volunteer maintainers for NAMEDOTCOM and SOFTLAYER.** These providers have no maintainer. Maintainers respond to PRs and fix bugs in a timely manner, and try to stay on top of protocol changes.
-- **ACME/Let's Encrypt support is frozen and will be removed after December 31, 2022.**  The `get-certs` command (renews certs via Let's Encrypt) has no maintainer. There are other projects that do a better job. If you don't use this feature, please do not start. If you do use this feature, please plan on migrating to something else.  See discussion in [issues/1400](https://github.com/StackExchange/dnscontrol/issues/1400)
-- **get-zones syntax changes in v3.16** Starting in [v3.16](documentation/v316.md), the command line arguments for `dnscontrol get-zones` changes. For backwards compatibility change `provider` to `-`. See documentation for details.
+- **REV() will switch from RFC2317 to RFC4183 in v5.0.**  This is a breaking change. Warnings are output if your configuration is affected. No date has been announced for v5.0. See https://docs.dnscontrol.org/language-reference/top-level-functions/revcompat
+- **MSDNS maintainer needed!** Without a new volunteer, this DNS provider will lose support after April 2025. See https://github.com/StackExchange/dnscontrol/issues/2878
+- **NAMEDOTCOM and SOFTLAYER need maintainers!** These providers have no maintainer. Maintainers respond to PRs and fix bugs in a timely manner, and try to stay on top of protocol changes.
+- **get-certs/ACME support is frozen and will be removed without notice between now and July 2025.** It has been unsupported since December 2022.  If you don't use this feature, do not start. If you do use this feature, migrate ASAP.  See discussion in [issues/1400](https://github.com/StackExchange/dnscontrol/issues/1400)
 
 ## More info at our website
 
 The website: [https://docs.dnscontrol.org/](https://docs.dnscontrol.org/)
 
 The getting started guide: [https://docs.dnscontrol.org/getting-started/getting-started](https://docs.dnscontrol.org/getting-started/getting-started)
+
+## Stargazers over time
+
+[![Stargazers over time](https://starchart.cc/StackExchange/dnscontrol.svg?variant=adaptive)](https://starchart.cc/StackExchange/dnscontrol)

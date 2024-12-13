@@ -16,17 +16,16 @@ import (
 
 	"github.com/StackExchange/dnscontrol/v4/models"
 	"github.com/StackExchange/dnscontrol/v4/pkg/diff"
-	"github.com/StackExchange/dnscontrol/v4/pkg/diff2"
 	"github.com/StackExchange/dnscontrol/v4/pkg/printer"
-	"github.com/StackExchange/dnscontrol/v4/pkg/txtutil"
 	"github.com/StackExchange/dnscontrol/v4/providers"
 )
 
 var features = providers.DocumentationNotes{
 	// The default for unlisted capabilities is 'Cannot'.
-	// See providers/capabilities.go for the entire list of capabilties.
+	// See providers/capabilities.go for the entire list of capabilities.
 	providers.CanAutoDNSSEC:          providers.Can(),
 	providers.CanGetZones:            providers.Can(),
+	providers.CanConcur:              providers.Cannot(),
 	providers.CanUseAKAMAICDN:        providers.Can(),
 	providers.CanUseAlias:            providers.Cannot(),
 	providers.CanUseCAA:              providers.Can(),
@@ -39,7 +38,6 @@ var features = providers.DocumentationNotes{
 	providers.CanUseSRV:              providers.Can(),
 	providers.CanUseSSHFP:            providers.Can(),
 	providers.CanUseTLSA:             providers.Can(),
-	providers.CantUseNOPURGE:         providers.Cannot(),
 	providers.DocCreateDomains:       providers.Can(),
 	providers.DocDualHost:            providers.Can(),
 	providers.DocOfficiallySupported: providers.Cannot(),
@@ -51,12 +49,15 @@ type edgeDNSProvider struct {
 }
 
 func init() {
+	const providerName = "AKAMAIEDGEDNS"
+	const providerMaintainer = "@edglynes"
 	fns := providers.DspFuncs{
 		Initializer:   newEdgeDNSDSP,
 		RecordAuditor: AuditRecords,
 	}
-	providers.RegisterDomainServiceProviderType("AKAMAIEDGEDNS", fns, features)
-	providers.RegisterCustomRecordType("AKAMAICDN", "AKAMAIEDGEDNS", "")
+	providers.RegisterDomainServiceProviderType(providerName, fns, features)
+	providers.RegisterCustomRecordType("AKAMAICDN", providerName, "")
+	providers.RegisterMaintainer(providerName, providerMaintainer)
 }
 
 // DnsServiceProvider
@@ -106,20 +107,13 @@ func (a *edgeDNSProvider) EnsureZoneExists(domain string) error {
 }
 
 // GetZoneRecordsCorrections returns a list of corrections that will turn existing records into dc.Records.
-func (a *edgeDNSProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, existingRecords models.Records) ([]*models.Correction, error) {
-	txtutil.SplitSingleLongTxt(existingRecords)
-
-	var corrections []*models.Correction
-	var keysToUpdate map[models.RecordKey][]string
-	var err error
-	if !diff2.EnableDiff2 {
-		keysToUpdate, err = (diff.New(dc)).ChangedGroups(existingRecords)
-	} else {
-		keysToUpdate, err = (diff.NewCompat(dc)).ChangedGroups(existingRecords)
-	}
+func (a *edgeDNSProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, existingRecords models.Records) ([]*models.Correction, int, error) {
+	keysToUpdate, toReport, actualChangeCount, err := diff.NewCompat(dc).ChangedGroups(existingRecords)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
+	// Start corrections with the reports
+	corrections := diff.GenerateMessageCorrections(toReport)
 
 	existingRecordsMap := make(map[models.RecordKey][]*models.RecordConfig)
 	for _, r := range existingRecords {
@@ -186,7 +180,7 @@ func (a *edgeDNSProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, exi
 	// AutoDnsSec correction
 	existingAutoDNSSecEnabled, err := isAutoDNSSecEnabled(dc.Name)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	desiredAutoDNSSecEnabled := dc.AutoDNSSEC == "on"
@@ -211,7 +205,7 @@ func (a *edgeDNSProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, exi
 		printer.Debugf("autoDNSSecEnable: Disable AutoDnsSec for zone %s\n", dc.Name)
 	}
 
-	return corrections, nil
+	return corrections, actualChangeCount, nil
 }
 
 // GetNameservers returns the nameservers for a domain.

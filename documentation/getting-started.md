@@ -5,6 +5,11 @@
 
 Choose one of the following installation methods:
 
+1. [Homebrew](#homebrew)
+2. [Docker](#docker)
+3. [GitHub binaries](#binaries)
+4. [GitHub source](#source)
+
 ### Homebrew
 
 On macOS (or Linux) you can install it using [Homebrew](https://brew.sh).
@@ -13,29 +18,12 @@ On macOS (or Linux) you can install it using [Homebrew](https://brew.sh).
 brew install dnscontrol
 ```
 
-### MacPorts
-
-Alternatively on macOS you can install it using [MacPorts](https://www.macports.org).
-
-```shell
-sudo port install dnscontrol
-```
-
 ### Docker
 
-You can use DNSControl locally using the Docker image from [Docker hub](https://hub.docker.com/r/stackexchange/dnscontrol/) and the command below.
+You can use DNSControl locally using the Docker image from [Docker hub](https://hub.docker.com/r/stackexchange/dnscontrol/) or [GitHub Container Registry](https://github.com/stackexchange/dnscontrol/pkgs/container/dnscontrol) and the command below.
 
 ```shell
-docker run --rm \
-  -it \
-  -v $(pwd)/dnsconfig.js:/dns/dnsconfig.js \
-  -v $(pwd)/creds.json:/dns/creds.json \
-  -v $(pwd)/spfcache.updated.json:/dns/spfcache.updated.json \
-  -v $(pwd)/spfcache.json:/dns/spfcache.json \
-  -v $(pwd)/zones/:/dns/zones/ \
-  -u $(id -u ${USER}):$(id -g ${USER}) \
-  stackexchange/dnscontrol \
-  preview
+docker run --rm -it -v "$(pwd):/dns"  ghcr.io/stackexchange/dnscontrol preview
 ```
 
 ### Binaries
@@ -63,6 +51,23 @@ git clone https://github.com/StackExchange/dnscontrol
 
 If these don't work, more info is in [#805](https://github.com/StackExchange/dnscontrol/issues/805).
 
+## 1.1. Shell Completion
+
+Shell completion is available for `zsh` and `bash`.
+
+### zsh
+
+Add `eval "$(dnscontrol shell-completion zsh)"` to your `~/.zshrc` file.
+
+This requires completion to be enabled in zsh. A good tutorial for this is available at
+[The Valuable Dev](https://thevaluable.dev/zsh-completion-guide-examples/) <sup>[[archived](https://web.archive.org/web/20231015083946/https://thevaluable.dev/zsh-completion-guide-examples/)]</sup>.
+
+### bash
+
+Add `eval "$(dnscontrol shell-completion bash)"` to your `~/.bashrc` file.
+
+This requires the `bash-completion` package to be installed. See [scop/bash-completion](https://github.com/scop/bash-completion/) for instructions.
+
 ## 2. Create a place for the config files
 
 Create a directory where you'll store your configuration files.
@@ -81,7 +86,7 @@ use BIND for DNS service, it is useful for testing.
 domains, and so on.
 
 Start your `dnsconfig.js` file by downloading
-[dnsconfig.js](https://github.com/StackExchange/dnscontrol/blob/master/documentation/assets/getting-started/dnsconfig.js)
+[dnsconfig.js](https://github.com/StackExchange/dnscontrol/blob/main/documentation/assets/getting-started/dnsconfig.js)
 and renaming it.
 
 The file looks like:
@@ -92,8 +97,8 @@ var REG_NONE = NewRegistrar("none");
 var DNS_BIND = NewDnsProvider("bind");
 
 D("example.com", REG_NONE, DnsProvider(DNS_BIND),
-    A("@", "1.2.3.4")
-);
+    A("@", "1.2.3.4"),
+END);
 ```
 {% endcode %}
 
@@ -147,7 +152,7 @@ It is only needed if any providers require credentials (API keys,
 usernames, passwords, etc.).
 
 Start your `creds.json` file by downloading
-[creds.json](https://github.com/StackExchange/dnscontrol/blob/master/documentation/assets/getting-started/creds.json)
+[creds.json](https://github.com/StackExchange/dnscontrol/blob/main/documentation/assets/getting-started/creds.json)
 and renaming it.
 
 The file looks like:
@@ -249,7 +254,7 @@ Done. 1 corrections.
 ## 6. Make a change
 
 Try making a change to `dnsconfig.js`. For example, change the IP
-address of in `A('@', '1.2.3.4')` or add an additional A record.
+address of in `A("@", "1.2.3.4")` or add an additional A record.
 
 In our case, we changed the IP address to 10.10.10.10. Previewing
 our change looks like this:
@@ -290,7 +295,7 @@ $TTL 300
 ```
 
 You can change the "DEFAULT_NOT_SET" text by following the documentation
-for the [BIND provider](providers/bind.md) to set
+for the [BIND provider](provider/bind.md) to set
 the "master" and "mbox" settings.  Try that now.
 
 

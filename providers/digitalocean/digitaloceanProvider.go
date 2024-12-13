@@ -10,8 +10,6 @@ import (
 
 	"github.com/StackExchange/dnscontrol/v4/models"
 	"github.com/StackExchange/dnscontrol/v4/pkg/diff"
-	"github.com/StackExchange/dnscontrol/v4/pkg/diff2"
-	"github.com/StackExchange/dnscontrol/v4/pkg/txtutil"
 	"github.com/StackExchange/dnscontrol/v4/providers"
 	"github.com/digitalocean/godo"
 	"github.com/miekg/dns/dnsutil"
@@ -72,7 +70,10 @@ retry:
 }
 
 var features = providers.DocumentationNotes{
+	// The default for unlisted capabilities is 'Cannot'.
+	// See providers/capabilities.go for the entire list of capabilities.
 	providers.CanGetZones:            providers.Can(),
+	providers.CanConcur:              providers.Can(),
 	providers.CanUseCAA:              providers.Can(),
 	providers.CanUseLOC:              providers.Cannot(),
 	providers.CanUseSRV:              providers.Can(),
@@ -81,11 +82,14 @@ var features = providers.DocumentationNotes{
 }
 
 func init() {
+	const providerName = "DIGITALOCEAN"
+	const providerMaintainer = "@Deraen"
 	fns := providers.DspFuncs{
 		Initializer:   NewDo,
 		RecordAuditor: AuditRecords,
 	}
-	providers.RegisterDomainServiceProviderType("DIGITALOCEAN", fns, features)
+	providers.RegisterDomainServiceProviderType(providerName, fns, features)
+	providers.RegisterMaintainer(providerName, providerMaintainer)
 }
 
 // EnsureZoneExists creates a zone if it does not exist
@@ -107,6 +111,40 @@ retry:
 		return err
 	}
 	return err
+}
+
+// ListZones returns the list of zones (domains) in this account.
+func (api *digitaloceanProvider) ListZones() ([]string, error) {
+	ctx := context.Background()
+	zones := []string{}
+	opt := &godo.ListOptions{PerPage: perPageSize}
+retry:
+	for {
+		result, resp, err := api.client.Domains.List(ctx, opt)
+		if err != nil {
+			if pauseAndRetry(resp) {
+				goto retry
+			}
+			return nil, err
+		}
+
+		for _, d := range result {
+			zones = append(zones, d.Name)
+		}
+
+		if resp.Links == nil || resp.Links.IsLastPage() {
+			break
+		}
+
+		page, err := resp.Links.CurrentPage()
+		if err != nil {
+			return nil, err
+		}
+
+		opt.Page = page + 1
+	}
+
+	return zones, nil
 }
 
 // GetNameservers returns the nameservers for domain.
@@ -134,22 +172,15 @@ func (api *digitaloceanProvider) GetZoneRecords(domain string, meta map[string]s
 }
 
 // GetZoneRecordsCorrections returns a list of corrections that will turn existing records into dc.Records.
-func (api *digitaloceanProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, existingRecords models.Records) ([]*models.Correction, error) {
-	txtutil.SplitSingleLongTxt(dc.Records) // Autosplit long TXT records
-
+func (api *digitaloceanProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, existingRecords models.Records) ([]*models.Correction, int, error) {
 	ctx := context.Background()
 
-	var corrections []*models.Correction
-	var differ diff.Differ
-	if !diff2.EnableDiff2 {
-		differ = diff.New(dc)
-	} else {
-		differ = diff.NewCompat(dc)
-	}
-	_, toCreate, toDelete, toModify, err := differ.IncrementalDiff(existingRecords)
+	toReport, toCreate, toDelete, toModify, actualChangeCount, err := diff.NewCompat(dc).IncrementalDiff(existingRecords)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
+	// Start corrections with the reports
+	corrections := diff.GenerateMessageCorrections(toReport)
 
 	// Deletes first so changing type works etc.
 	for _, m := range toDelete {
@@ -170,7 +201,7 @@ func (api *digitaloceanProvider) GetZoneRecordsCorrections(dc *models.DomainConf
 		corrections = append(corrections, corr)
 	}
 	for _, m := range toCreate {
-		req := toReq(dc, m.Desired)
+		req := toReq(m.Desired)
 		corr := &models.Correction{
 			Msg: m.String(),
 			F: func() error {
@@ -188,7 +219,7 @@ func (api *digitaloceanProvider) GetZoneRecordsCorrections(dc *models.DomainConf
 	}
 	for _, m := range toModify {
 		id := m.Existing.Original.(*godo.DomainRecord).ID
-		req := toReq(dc, m.Desired)
+		req := toReq(m.Desired)
 		corr := &models.Correction{
 			Msg: fmt.Sprintf("%s, DO ID: %d", m.String(), id),
 			F: func() error {
@@ -205,7 +236,7 @@ func (api *digitaloceanProvider) GetZoneRecordsCorrections(dc *models.DomainConf
 		corrections = append(corrections, corr)
 	}
 
-	return corrections, nil
+	return corrections, actualChangeCount, nil
 }
 
 func getRecords(api *digitaloceanProvider, name string) ([]godo.DomainRecord, error) {
@@ -279,7 +310,7 @@ func toRc(domain string, r *godo.DomainRecord) *models.RecordConfig {
 	return t
 }
 
-func toReq(dc *models.DomainConfig, rc *models.RecordConfig) *godo.DomainRecordEditRequest {
+func toReq(rc *models.RecordConfig) *godo.DomainRecordEditRequest {
 	name := rc.GetLabel()         // DO wants the short name or "@" for apex.
 	target := rc.GetTargetField() // DO uses the target field only for a single value
 	priority := 0                 // DO uses the same property for MX and SRV priority

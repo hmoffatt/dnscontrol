@@ -10,7 +10,6 @@ import (
 
 	"github.com/StackExchange/dnscontrol/v4/models"
 	"github.com/StackExchange/dnscontrol/v4/pkg/diff"
-	"github.com/StackExchange/dnscontrol/v4/pkg/diff2"
 	"github.com/StackExchange/dnscontrol/v4/providers"
 )
 
@@ -40,7 +39,10 @@ func newPacketframe(m map[string]string, metadata json.RawMessage) (providers.DN
 }
 
 var features = providers.DocumentationNotes{
+	// The default for unlisted capabilities is 'Cannot'.
+	// See providers/capabilities.go for the entire list of capabilities.
 	providers.CanGetZones:            providers.Unimplemented(),
+	providers.CanConcur:              providers.Cannot(),
 	providers.CanUsePTR:              providers.Can(),
 	providers.CanUseSRV:              providers.Can(),
 	providers.DocDualHost:            providers.Cannot(),
@@ -48,11 +50,14 @@ var features = providers.DocumentationNotes{
 }
 
 func init() {
+	const providerName = "PACKETFRAME"
+	const providerMaintainer = "@hamptonmoore"
 	fns := providers.DspFuncs{
 		Initializer:   newPacketframe,
 		RecordAuditor: AuditRecords,
 	}
-	providers.RegisterDomainServiceProviderType("PACKETFRAME", fns, features)
+	providers.RegisterDomainServiceProviderType(providerName, fns, features)
+	providers.RegisterMaintainer(providerName, providerMaintainer)
 }
 
 // GetNameservers returns the nameservers for a domain.
@@ -101,28 +106,23 @@ func (api *packetframeProvider) GetZoneRecords(domain string, meta map[string]st
 }
 
 // GetZoneRecordsCorrections returns a list of corrections that will turn existing records into dc.Records.
-func (api *packetframeProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, existingRecords models.Records) ([]*models.Correction, error) {
+func (api *packetframeProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, existingRecords models.Records) ([]*models.Correction, int, error) {
 	zone, err := api.getZone(dc.Name)
 	if err != nil {
-		return nil, fmt.Errorf("no such zone %q in Packetframe account", dc.Name)
+		return nil, 0, fmt.Errorf("no such zone %q in Packetframe account", dc.Name)
 	}
 
-	var corrections []*models.Correction
-	var differ diff.Differ
-	if !diff2.EnableDiff2 {
-		differ = diff.New(dc)
-	} else {
-		differ = diff.NewCompat(dc)
-	}
-	_, create, dels, modify, err := differ.IncrementalDiff(existingRecords)
+	toReport, create, dels, modify, actualChangeCount, err := diff.NewCompat(dc).IncrementalDiff(existingRecords)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
+	// Start corrections with the reports
+	corrections := diff.GenerateMessageCorrections(toReport)
 
 	for _, m := range create {
-		req, err := toReq(zone.ID, dc, m.Desired)
+		req, err := toReq(zone.ID, m.Desired)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		corr := &models.Correction{
 			Msg: m.String(),
@@ -156,7 +156,7 @@ func (api *packetframeProvider) GetZoneRecordsCorrections(dc *models.DomainConfi
 			continue
 		}
 
-		req, _ := toReq(zone.ID, dc, m.Desired)
+		req, _ := toReq(zone.ID, m.Desired)
 		req.ID = original.ID
 		corr := &models.Correction{
 			Msg: m.String(),
@@ -168,10 +168,10 @@ func (api *packetframeProvider) GetZoneRecordsCorrections(dc *models.DomainConfi
 		corrections = append(corrections, corr)
 	}
 
-	return corrections, nil
+	return corrections, actualChangeCount, nil
 }
 
-func toReq(zoneID string, dc *models.DomainConfig, rc *models.RecordConfig) (*domainRecord, error) {
+func toReq(zoneID string, rc *models.RecordConfig) (*domainRecord, error) {
 	req := &domainRecord{
 		Type:  rc.Type,
 		TTL:   int(rc.TTL),

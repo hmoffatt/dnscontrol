@@ -16,7 +16,7 @@ For convenience, both configuration files are shown below.
 {% code title="dnsconfig.js" %}
 ```javascript
 var PROVIDER_NONE = NewRegistrar("none");
-var PROVIDER_TRANSIP = NewDnsProvider("transip", "-");
+var PROVIDER_TRANSIP = NewDnsProvider("transip");
 
 D("cafferata.dev",
     PROVIDER_NONE,
@@ -25,8 +25,8 @@ D("cafferata.dev",
     TXT("spf", [
         "v=spf1",
         "-all"
-    ].join(" "))
-);
+    ].join(" ")),
+END);
 ```
 {% endcode %}
 
@@ -100,7 +100,7 @@ Because the above GitLab CI configuration expects a diff, we apply this by (_for
 
 ```diff
 var PROVIDER_NONE = NewRegistrar("none");
-var PROVIDER_TRANSIP = NewDnsProvider("transip", "-");
+var PROVIDER_TRANSIP = NewDnsProvider("transip");
 
 D("cafferata.dev",
     PROVIDER_NONE,

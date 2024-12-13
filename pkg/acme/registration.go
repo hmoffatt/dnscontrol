@@ -6,9 +6,9 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 
-	"github.com/go-acme/lego/certcrypto"
-	"github.com/go-acme/lego/lego"
-	"github.com/go-acme/lego/registration"
+	"github.com/go-acme/lego/v4/certcrypto"
+	"github.com/go-acme/lego/v4/lego"
+	"github.com/go-acme/lego/v4/registration"
 )
 
 func (c *certManager) getOrCreateAccount() (*Account, error) {
@@ -28,7 +28,8 @@ func (c *certManager) getOrCreateAccount() (*Account, error) {
 	return account, err
 }
 
-func (c *certManager) createAccount(email string) (*Account, error) {
+// func (c *certManager) createAccount(email string) (*Account, error) {
+func (c *certManager) createAccount(_ string) (*Account, error) {
 	privateKey, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
 	if err != nil {
 		return nil, err

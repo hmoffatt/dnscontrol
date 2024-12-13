@@ -9,8 +9,9 @@ import (
 	"github.com/fatih/color"
 )
 
-func analyzeByRecordSet(cc *CompareConfig) ChangeList {
+func analyzeByRecordSet(cc *CompareConfig) (ChangeList, int) {
 	var instructions ChangeList
+	var actualChangeCount int
 	// For each label...
 	for _, lc := range cc.ldata {
 		// for each type at that label...
@@ -18,7 +19,9 @@ func analyzeByRecordSet(cc *CompareConfig) ChangeList {
 			// ...if there are changes generate an instruction.
 			ets := rt.existingTargets
 			dts := rt.desiredTargets
-			msgs := genmsgs(ets, dts)
+			cs := diffTargets(ets, dts)
+			actualChangeCount += len(cs)
+			msgs := justMsgs(cs)
 			if len(msgs) == 0 { // No differences?
 				// The records at this rset are the same. No work to be done.
 				continue
@@ -32,11 +35,15 @@ func analyzeByRecordSet(cc *CompareConfig) ChangeList {
 			}
 		}
 	}
-	return instructions
+
+	instructions = orderByDependencies(instructions)
+
+	return instructions, actualChangeCount
 }
 
-func analyzeByLabel(cc *CompareConfig) ChangeList {
+func analyzeByLabel(cc *CompareConfig) (ChangeList, int) {
 	var instructions ChangeList
+	var actualChangeCount int
 	// Accumulate any changes and collect the info needed to generate instructions.
 	for _, lc := range cc.ldata {
 		// for each type at that label...
@@ -49,7 +56,9 @@ func analyzeByLabel(cc *CompareConfig) ChangeList {
 			// for each type at that label...
 			ets := rt.existingTargets
 			dts := rt.desiredTargets
-			msgs := genmsgs(ets, dts)
+			cs := diffTargets(ets, dts)
+			actualChangeCount += len(cs)
+			msgs := justMsgs(cs)
 			k := models.RecordKey{NameFQDN: label, Type: rt.rType}
 			msgsByKey[k] = msgs
 			accMsgs = append(accMsgs, msgs...)                    // Accumulate the messages
@@ -74,22 +83,29 @@ func analyzeByLabel(cc *CompareConfig) ChangeList {
 		}
 	}
 
-	return instructions
+	instructions = orderByDependencies(instructions)
+
+	return instructions, actualChangeCount
 }
 
-func analyzeByRecord(cc *CompareConfig) ChangeList {
+func analyzeByRecord(cc *CompareConfig) (ChangeList, int) {
 
 	var instructions ChangeList
+	var actualChangeCount int
 	// For each label, for each type at that label, see if there are any changes.
 	for _, lc := range cc.ldata {
 		for _, rt := range lc.tdata {
 			ets := rt.existingTargets
 			dts := rt.desiredTargets
 			cs := diffTargets(ets, dts)
+			actualChangeCount += len(cs)
 			instructions = append(instructions, cs...)
 		}
 	}
-	return instructions
+
+	instructions = orderByDependencies(instructions)
+
+	return instructions, actualChangeCount
 }
 
 // FYI: there is no analyzeByZone.  diff2.ByZone() calls analyzeByRecords().
@@ -236,6 +252,8 @@ func humanDiff(a, b targetConfig) string {
 
 func diffTargets(existing, desired []targetConfig) ChangeList {
 
+	//fmt.Printf("DEBUG: diffTargets(\nexisting=%v\ndesired=%v\nDEBUG.\n", existing, desired)
+
 	// Nothing to do?
 	if len(existing) == 0 && len(desired) == 0 {
 		return nil
@@ -293,19 +311,10 @@ func diffTargets(existing, desired []targetConfig) ChangeList {
 	return instructions
 }
 
-func genmsgs(existing, desired []targetConfig) []string {
-	return justMsgs(diffTargets(existing, desired))
-}
-
 func justMsgs(cl ChangeList) []string {
 	var msgs []string
 	for _, c := range cl {
 		msgs = append(msgs, c.Msgs...)
 	}
 	return msgs
-}
-
-func justMsgString(cl ChangeList) string {
-	msgs := justMsgs(cl)
-	return strings.Join(msgs, "\n")
 }

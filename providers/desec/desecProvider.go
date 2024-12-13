@@ -4,13 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"sort"
+	"strings"
 
 	"github.com/StackExchange/dnscontrol/v4/models"
 	"github.com/StackExchange/dnscontrol/v4/pkg/diff"
-	"github.com/StackExchange/dnscontrol/v4/pkg/diff2"
 	"github.com/StackExchange/dnscontrol/v4/pkg/printer"
-	"github.com/StackExchange/dnscontrol/v4/pkg/txtutil"
 	"github.com/StackExchange/dnscontrol/v4/providers"
 	"github.com/miekg/dns/dnsutil"
 )
@@ -24,32 +22,30 @@ Info required in `creds.json`:
 // NewDeSec creates the provider.
 func NewDeSec(m map[string]string, metadata json.RawMessage) (providers.DNSServiceProvider, error) {
 	c := &desecProvider{}
-	c.creds.token = m["auth-token"]
-	if c.creds.token == "" {
+	c.token = strings.TrimSpace(m["auth-token"])
+	if c.token == "" {
 		return nil, fmt.Errorf("missing deSEC auth-token")
 	}
-	if err := c.authenticate(); err != nil {
-		return nil, fmt.Errorf("authentication failed")
-	}
-	//DomainIndex is used for corrections (minttl) and domain creation
-	if err := c.initializeDomainIndex(); err != nil {
-		return nil, err
-	}
-
 	return c, nil
 }
 
 var features = providers.DocumentationNotes{
+	// The default for unlisted capabilities is 'Cannot'.
+	// See providers/capabilities.go for the entire list of capabilities.
 	providers.CanAutoDNSSEC:          providers.Can("deSEC always signs all records. When trying to disable, a notice is printed."),
 	providers.CanGetZones:            providers.Can(),
+	providers.CanConcur:              providers.Can(),
 	providers.CanUseAlias:            providers.Unimplemented("Apex aliasing is supported via new SVCB and HTTPS record types. For details, check the deSEC docs."),
 	providers.CanUseCAA:              providers.Can(),
 	providers.CanUseDS:               providers.Can(),
+	providers.CanUseDNSKEY:           providers.Can(),
+	providers.CanUseHTTPS:            providers.Can(),
 	providers.CanUseLOC:              providers.Unimplemented(),
 	providers.CanUseNAPTR:            providers.Can(),
 	providers.CanUsePTR:              providers.Can(),
 	providers.CanUseSRV:              providers.Can(),
 	providers.CanUseSSHFP:            providers.Can(),
+	providers.CanUseSVCB:             providers.Can(),
 	providers.CanUseTLSA:             providers.Can(),
 	providers.DocCreateDomains:       providers.Can(),
 	providers.DocDualHost:            providers.Unimplemented(),
@@ -62,11 +58,14 @@ var defaultNameServerNames = []string{
 }
 
 func init() {
+	const providerName = "DESEC"
+	const providerMaintainer = "@D3luxee"
 	fns := providers.DspFuncs{
 		Initializer:   NewDeSec,
 		RecordAuditor: AuditRecords,
 	}
-	providers.RegisterDomainServiceProviderType("DESEC", fns, features)
+	providers.RegisterDomainServiceProviderType(providerName, fns, features)
+	providers.RegisterMaintainer(providerName, providerMaintainer)
 }
 
 // GetNameservers returns the nameservers for a domain.
@@ -116,9 +115,13 @@ func (c *desecProvider) GetZoneRecords(domain string, meta map[string]string) (m
 
 // EnsureZoneExists creates a zone if it does not exist
 func (c *desecProvider) EnsureZoneExists(domain string) error {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	if _, ok := c.domainIndex[domain]; ok {
+	_, ok, err := c.searchDomainIndex(domain)
+	if err != nil {
+		return err
+	}
+
+	if ok {
+		// Domain already exists
 		return nil
 	}
 	return c.createDomain(domain)
@@ -151,34 +154,26 @@ func PrepDesiredRecords(dc *models.DomainConfig, minTTL uint32) {
 }
 
 // GetZoneRecordsCorrections returns a list of corrections that will turn existing records into dc.Records.
-func (c *desecProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, existing models.Records) ([]*models.Correction, error) {
-	txtutil.SplitSingleLongTxt(dc.Records)
-
-	var minTTL uint32
-	c.mutex.Lock()
-	if ttl, ok := c.domainIndex[dc.Name]; !ok {
-		minTTL = 3600
-	} else {
-		minTTL = ttl
+func (c *desecProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, existing models.Records) ([]*models.Correction, int, error) {
+	minTTL, ok, err := c.searchDomainIndex(dc.Name)
+	if err != nil {
+		return nil, 0, err
 	}
-	c.mutex.Unlock()
+	if !ok {
+		minTTL = 3600
+	}
+
 	PrepDesiredRecords(dc, minTTL)
 
-	var corrections []*models.Correction
-	var err error
-	var keysToUpdate map[models.RecordKey][]string
-	if !diff2.EnableDiff2 {
-		// diff existing vs. current.
-		keysToUpdate, err = (diff.New(dc)).ChangedGroups(existing)
-	} else {
-		keysToUpdate, err = (diff.NewCompat(dc)).ChangedGroups(existing)
-	}
+	keysToUpdate, toReport, actualChangeCount, err := diff.NewCompat(dc).ChangedGroups(existing)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
+	// Start corrections with the reports
+	corrections := diff.GenerateMessageCorrections(toReport)
 
-	if len(keysToUpdate) == 0 {
-		return nil, nil
+	if len(corrections) == 0 && len(keysToUpdate) == 0 {
+		return nil, 0, nil
 	}
 
 	desiredRecords := dc.Records.GroupedByKey()
@@ -209,7 +204,7 @@ func (c *desecProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, exist
 			}
 		} else {
 			//it must be an update or create, both can be done with the same api call.
-			ns := recordsToNative(desiredRecords[label], dc.Name)
+			ns := recordsToNative(desiredRecords[label])
 			if len(ns) > 1 {
 				panic("we got more than one resource record to create / modify")
 			}
@@ -224,19 +219,23 @@ func (c *desecProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, exist
 			}
 		}
 	}
-	msg := fmt.Sprintf("Changes:\n%s", buf)
-	corrections = append(corrections,
-		&models.Correction{
-			Msg: msg,
-			F: func() error {
-				rc := rrs
-				err := c.upsertRR(rc, dc.Name)
-				if err != nil {
-					return err
-				}
-				return nil
-			},
-		})
+
+	// If there are changes, upsert them.
+	if len(rrs) > 0 {
+		msg := fmt.Sprintf("Changes:\n%s", buf)
+		corrections = append(corrections,
+			&models.Correction{
+				Msg: msg,
+				F: func() error {
+					rc := rrs
+					err := c.upsertRR(rc, dc.Name)
+					if err != nil {
+						return err
+					}
+					return nil
+				},
+			})
+	}
 
 	// NB(tlim): This sort is just to make updates look pretty. It is
 	// cosmetic.  The risk here is that there may be some updates that
@@ -244,16 +243,12 @@ func (c *desecProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, exist
 	// However the code doesn't seem to have such situation.  All tests
 	// pass.  That said, if this breaks anything, the easiest fix might
 	// be to just remove the sort.
-	sort.Slice(corrections, func(i, j int) bool { return diff.CorrectionLess(corrections, i, j) })
+	//sort.Slice(corrections, func(i, j int) bool { return diff.CorrectionLess(corrections, i, j) })
 
-	return corrections, nil
+	return corrections, actualChangeCount, nil
 }
 
 // ListZones return all the zones in the account
 func (c *desecProvider) ListZones() ([]string, error) {
-	var domains []string
-	for domain := range c.domainIndex {
-		domains = append(domains, domain)
-	}
-	return domains, nil
+	return c.listDomainIndex()
 }

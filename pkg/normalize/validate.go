@@ -1,18 +1,16 @@
 package normalize
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"sort"
 	"strings"
 
 	"github.com/StackExchange/dnscontrol/v4/models"
-	"github.com/StackExchange/dnscontrol/v4/pkg/diff2"
 	"github.com/StackExchange/dnscontrol/v4/pkg/transform"
 	"github.com/StackExchange/dnscontrol/v4/providers"
-	"github.com/miekg/dns"
 	"github.com/miekg/dns/dnsutil"
-	"golang.org/x/exp/slices"
 )
 
 // Returns false if target does not validate.
@@ -61,7 +59,11 @@ func validateRecordTypes(rec *models.RecordConfig, domain string, pTypes []strin
 		"ALIAS":            false,
 		"CAA":              true,
 		"CNAME":            true,
+		"DHCID":            true,
+		"DNAME":            true,
 		"DS":               true,
+		"DNSKEY":           true,
+		"HTTPS":            true,
 		"IMPORT_TRANSFORM": false,
 		"LOC":              true,
 		"MX":               true,
@@ -71,6 +73,7 @@ func validateRecordTypes(rec *models.RecordConfig, domain string, pTypes []strin
 		"SOA":              true,
 		"SRV":              true,
 		"SSHFP":            true,
+		"SVCB":             true,
 		"TLSA":             true,
 		"TXT":              true,
 	}
@@ -104,7 +107,7 @@ func errorRepeat(label, domain string) string {
 	)
 }
 
-func checkLabel(label string, rType string, target, domain string, meta map[string]string) error {
+func checkLabel(label string, rType string, domain string, meta map[string]string) error {
 	if label == "@" {
 		return nil
 	}
@@ -116,7 +119,7 @@ func checkLabel(label string, rType string, target, domain string, meta map[stri
 	}
 	if label == domain || strings.HasSuffix(label, "."+domain) {
 		if m := meta["skip_fqdn_check"]; m != "true" {
-			return fmt.Errorf(errorRepeat(label, domain))
+			return errors.New(errorRepeat(label, domain))
 		}
 	}
 
@@ -143,24 +146,24 @@ func checkLabel(label string, rType string, target, domain string, meta map[stri
 	return nil
 }
 
-func checkSoa(expire uint32, minttl uint32, refresh uint32, retry uint32, serial uint32, mbox string) error {
+func checkSoa(expire uint32, minttl uint32, refresh uint32, retry uint32, mbox string) error {
 	if expire <= 0 {
-		return fmt.Errorf("SOA Expire must be > 0")
+		return errors.New("SOA Expire must be > 0")
 	}
 	if minttl <= 0 {
-		return fmt.Errorf("SOA Minimum TTL must be > 0")
+		return errors.New("SOA Minimum TTL must be > 0")
 	}
 	if refresh <= 0 {
-		return fmt.Errorf("SOA Refresh must be > 0")
+		return errors.New("SOA Refresh must be > 0")
 	}
 	if retry <= 0 {
-		return fmt.Errorf("SOA Retry must be > 0")
+		return errors.New("SOA Retry must be > 0")
 	}
 	if mbox == "" {
-		return fmt.Errorf("SOA MBox must be specified")
+		return errors.New("SOA MBox must be specified")
 	}
 	if strings.ContainsRune(mbox, '@') {
-		return fmt.Errorf("SOA MBox must have '.' instead of '@'")
+		return errors.New("SOA MBox must have '.' instead of '@'")
 	}
 	return nil
 }
@@ -188,13 +191,15 @@ func checkTargets(rec *models.RecordConfig, domain string) (errs []error) {
 	case "CNAME":
 		check(checkTarget(target))
 		if label == "@" {
-			check(fmt.Errorf("cannot create CNAME record for bare domain"))
+			check(errors.New("cannot create CNAME record for bare domain"))
 		}
 		labelFQDN := dnsutil.AddOrigin(label, domain)
 		targetFQDN := dnsutil.AddOrigin(target, domain)
 		if labelFQDN == targetFQDN {
-			check(fmt.Errorf("CNAME loop (target points at itself)"))
+			check(errors.New("CNAME loop (target points at itself)"))
 		}
+	case "DNAME":
+		check(checkTarget(target))
 	case "LOC":
 	case "MX":
 		check(checkTarget(target))
@@ -205,23 +210,23 @@ func checkTargets(rec *models.RecordConfig, domain string) (errs []error) {
 	case "NS":
 		check(checkTarget(target))
 		if label == "@" {
-			check(fmt.Errorf("cannot create NS record for bare domain. Use NAMESERVER instead"))
+			check(errors.New("cannot create NS record for bare domain. Use NAMESERVER instead"))
 		}
 	case "NS1_URLFWD":
 		if len(strings.Fields(target)) != 5 {
-			check(fmt.Errorf("record should follow format: \"from to redirectType pathForwardingMode queryForwarding\""))
+			check(errors.New("record should follow format: \"from to redirectType pathForwardingMode queryForwarding\""))
 		}
 	case "PTR":
 		check(checkTarget(target))
 	case "SOA":
-		check(checkSoa(rec.SoaExpire, rec.SoaMinttl, rec.SoaRefresh, rec.SoaRetry, rec.SoaSerial, rec.SoaMbox))
+		check(checkSoa(rec.SoaExpire, rec.SoaMinttl, rec.SoaRefresh, rec.SoaRetry, rec.SoaMbox))
 		check(checkTarget(target))
 		if label != "@" {
-			check(fmt.Errorf("SOA record is only valid for bare domain"))
+			check(errors.New("SOA record is only valid for bare domain"))
 		}
 	case "SRV":
 		check(checkTarget(target))
-	case "TXT", "IMPORT_TRANSFORM", "CAA", "SSHFP", "TLSA", "DS":
+	case "CAA", "DHCID", "DNSKEY", "DS", "HTTPS", "IMPORT_TRANSFORM", "SSHFP", "SVCB", "TLSA", "TXT":
 	default:
 		if rec.Metadata["orig_custom_type"] != "" {
 			// it is a valid custom type. We perform no validation on target
@@ -233,17 +238,39 @@ func checkTargets(rec *models.RecordConfig, domain string) (errs []error) {
 	return
 }
 
-func transformCNAME(target, oldDomain, newDomain string) string {
-	// Canonicalize. If it isn't a FQDN, add the newDomain.
-	result := dnsutil.AddOrigin(target, oldDomain)
-	if dns.IsFqdn(result) {
-		result = result[:len(result)-1]
+func transformCNAME(target, oldDomain, newDomain, suffixstrip string) string {
+	// Canonicalize the target.  Add the newDomain minus the suffixstrip.
+	//  foo -> foo.oldDomain.newDomain
+	//  foo. -> foo.newDomain
+	nd := strings.TrimPrefix(newDomain, suffixstrip+".")
+	if strings.HasSuffix(target, ".") {
+		return target + nd + "."
 	}
-	return dnsutil.AddOrigin(result, newDomain) + "."
+	return dnsutil.AddOrigin(target, oldDomain) + "." + nd + "."
+}
+
+func newRec(rec *models.RecordConfig, ttl uint32) *models.RecordConfig {
+	rec2, _ := rec.Copy()
+	if ttl != 0 {
+		rec2.TTL = ttl
+	}
+	return rec2
+}
+
+func transformLabel(label, suffixstrip string) (string, error) {
+	if suffixstrip == "" {
+		return label, nil
+	}
+	suffixstrip = "." + suffixstrip
+	if !strings.HasSuffix(label, suffixstrip) {
+		return "", fmt.Errorf("label %q does not end with %q", label, suffixstrip)
+	}
+	return label[:len(label)-len(suffixstrip)], nil
 }
 
 // import_transform imports the records of one zone into another, modifying records along the way.
-func importTransform(srcDomain, dstDomain *models.DomainConfig, transforms []transform.IPConversion, ttl uint32) error {
+func importTransform(srcDomain, dstDomain *models.DomainConfig,
+	transforms []transform.IPConversion, ttl uint32, suffixstrip string) error {
 	// Read srcDomain.Records, transform, and append to dstDomain.Records:
 	// 1. Skip any that aren't A or CNAMEs.
 	// 2. Append destDomainname to the end of the label.
@@ -251,41 +278,42 @@ func importTransform(srcDomain, dstDomain *models.DomainConfig, transforms []tra
 	// 4. For As, change the target as described the transforms.
 
 	for _, rec := range srcDomain.Records {
+		// If this record is marked to be skipped, skip it.
+		if rec.Metadata["import_transform_skip"] != "" {
+			continue
+		}
+		// If the dstDomain already has a record with this type+label, skip it.
 		if dstDomain.Records.HasRecordTypeName(rec.Type, rec.GetLabelFQDN()) {
 			continue
 		}
-		newRec := func() *models.RecordConfig {
-			rec2, _ := rec.Copy()
-			newlabel := rec2.GetLabelFQDN()
-			rec2.SetLabel(newlabel, dstDomain.Name)
-			if ttl != 0 {
-				rec2.TTL = ttl
-			}
-			return rec2
-		}
-		switch rec.Type { // #rtype_variations
+		switch rec.Type {
 		case "A":
 			trs, err := transform.IPToList(net.ParseIP(rec.GetTargetField()), transforms)
 			if err != nil {
 				return fmt.Errorf("import_transform: TransformIP(%v, %v) returned err=%s", rec.GetTargetField(), transforms, err)
 			}
 			for _, tr := range trs {
-				r := newRec()
+				r := newRec(rec, ttl)
+				l, err := transformLabel(r.GetLabelFQDN(), suffixstrip)
+				if err != nil {
+					return err
+				}
+				r.SetLabel(l, dstDomain.Name)
 				r.SetTarget(tr.String())
 				dstDomain.Records = append(dstDomain.Records, r)
 			}
 		case "CNAME":
-			r := newRec()
-			r.SetTarget(transformCNAME(r.GetTargetField(), srcDomain.Name, dstDomain.Name))
+			r := newRec(rec, ttl)
+			l, err := transformLabel(r.GetLabelFQDN(), suffixstrip)
+			if err != nil {
+				return err
+			}
+			r.SetLabel(l, dstDomain.Name)
+			r.SetTarget(transformCNAME(r.GetTargetField(), srcDomain.Name, dstDomain.Name, suffixstrip))
 			dstDomain.Records = append(dstDomain.Records, r)
-		case "AKAMAICDN", "MX", "NAPTR", "NS", "SOA", "SRV", "TXT", "CAA", "TLSA":
-			// Not imported.
-			continue
-		case "LOC":
-			continue
 		default:
-			return fmt.Errorf("import_transform: Unimplemented record type %v (%v)",
-				rec.Type, rec.GetLabel())
+			// Anything else is ignored.
+			continue
 		}
 	}
 	return nil
@@ -327,10 +355,10 @@ func ValidateAndNormalizeConfig(config *models.DNSConfig) (errs []error) {
 				// be performed.
 				continue
 			}
-			// If NO_PURGE is in use, make sure this *isn't* a provider that *doesn't* support NO_PURGE.
-			if domain.KeepUnknown && providers.ProviderHasCapability(pType, providers.CantUseNOPURGE) {
-				errs = append(errs, fmt.Errorf("%s uses NO_PURGE which is not supported by %s(%s)", domain.Name, provider.Name, pType))
-			}
+			//			// If NO_PURGE is in use, make sure this *isn't* a provider that *doesn't* support NO_PURGE.
+			//			if domain.KeepUnknown && providers.ProviderHasCapability(pType, providers.CantUseNOPURGE) {
+			//				errs = append(errs, fmt.Errorf("%s uses NO_PURGE which is not supported by %s(%s)", domain.Name, provider.Name, pType))
+			//			}
 		}
 
 		// Normalize Nameservers.
@@ -379,7 +407,7 @@ func ValidateAndNormalizeConfig(config *models.DNSConfig) (errs []error) {
 			if err := validateRecordTypes(rec, domain.Name, pTypes); err != nil {
 				errs = append(errs, err)
 			}
-			if err := checkLabel(rec.GetLabel(), rec.Type, rec.GetTargetField(), domain.Name, rec.Metadata); err != nil {
+			if err := checkLabel(rec.GetLabel(), rec.Type, domain.Name, rec.Metadata); err != nil {
 				errs = append(errs, err)
 			}
 
@@ -388,7 +416,7 @@ func ValidateAndNormalizeConfig(config *models.DNSConfig) (errs []error) {
 			}
 
 			// Canonicalize Targets.
-			if rec.Type == "CNAME" || rec.Type == "MX" || rec.Type == "NS" || rec.Type == "SRV" {
+			if rec.Type == "ALIAS" || rec.Type == "CNAME" || rec.Type == "MX" || rec.Type == "NS" || rec.Type == "SRV" {
 				// #rtype_variations
 				// These record types have a target that is a hostname.
 				// We normalize them to a FQDN so there is less variation to handle.  If a
@@ -429,11 +457,8 @@ func ValidateAndNormalizeConfig(config *models.DNSConfig) (errs []error) {
 			// Populate FQDN:
 			rec.SetLabel(rec.GetLabel(), domain.Name)
 
-			// Warn if a diff1-only feature is used in diff2 mode.
-			if diff2.EnableDiff2 {
-				if _, ok := rec.Metadata["ignore_name_disable_safety_check"]; ok {
-					errs = append(errs, fmt.Errorf("IGNORE_NAME_DISABLE_SAFETY_CHECK no longer supported. Please use DISABLE_IGNORE_SAFETY_CHECK for the entire domain"))
-				}
+			if _, ok := rec.Metadata["ignore_name_disable_safety_check"]; ok {
+				errs = append(errs, errors.New("IGNORE_NAME_DISABLE_SAFETY_CHECK no longer supported. Please use DISABLE_IGNORE_SAFETY_CHECK for the entire domain"))
 			}
 
 		}
@@ -448,6 +473,7 @@ func ValidateAndNormalizeConfig(config *models.DNSConfig) (errs []error) {
 	for _, domain := range config.Domains {
 		for _, rec := range domain.Records {
 			if rec.Type == "IMPORT_TRANSFORM" {
+				suffixstrip := rec.Metadata["transform_suffixstrip"]
 				table, err := transform.DecodeTransformTable(rec.Metadata["transform_table"])
 				if err != nil {
 					errs = append(errs, err)
@@ -458,7 +484,7 @@ func ValidateAndNormalizeConfig(config *models.DNSConfig) (errs []error) {
 					err = fmt.Errorf("IMPORT_TRANSFORM mentions non-existant domain %q", rec.GetTargetField())
 					errs = append(errs, err)
 				}
-				err = importTransform(c, domain, table, rec.TTL)
+				err = importTransform(c, domain, table, rec.TTL, suffixstrip)
 				if err != nil {
 					errs = append(errs, err)
 				}
@@ -578,7 +604,7 @@ func checkCNAMEs(dc *models.DomainConfig) (errs []error) {
 func checkDuplicates(records []*models.RecordConfig) (errs []error) {
 	seen := map[string]*models.RecordConfig{}
 	for _, r := range records {
-		diffable := fmt.Sprintf("%s %s %s", r.GetLabelFQDN(), r.Type, r.ToDiffable())
+		diffable := fmt.Sprintf("%s %s %s", r.GetLabelFQDN(), r.Type, r.ToComparableNoTTL())
 		if seen[diffable] != nil {
 			errs = append(errs, fmt.Errorf("exact duplicate record found: %s", diffable))
 		}
@@ -619,13 +645,12 @@ func checkRecordSetHasMultipleTTLs(records []*models.RecordConfig) (errs []error
 		labels[i] = k
 		i++
 	}
-
 	sort.Strings(labels)
-	slices.Compact(labels)
+	// NB(tlim): No need to de-dup labels. They come from map keys.
 
-	// Invert for a more clear error message:
 	for _, label := range labels {
 		if len(m[label]) > 1 {
+			// Invert for a more clear error message:
 			r := make(map[string]map[uint32]bool)
 			for ttl, rtypes := range m[label] {
 				for rtype := range rtypes {
@@ -688,6 +713,10 @@ var providerCapabilityChecks = []pairTypeCapability{
 	capabilityCheck("AUTODNSSEC", providers.CanAutoDNSSEC),
 	capabilityCheck("AZURE_ALIAS", providers.CanUseAzureAlias),
 	capabilityCheck("CAA", providers.CanUseCAA),
+	capabilityCheck("DHCID", providers.CanUseDHCID),
+	capabilityCheck("DNAME", providers.CanUseDNAME),
+	capabilityCheck("DNSKEY", providers.CanUseDNSKEY),
+	capabilityCheck("HTTPS", providers.CanUseHTTPS),
 	capabilityCheck("LOC", providers.CanUseLOC),
 	capabilityCheck("NAPTR", providers.CanUseNAPTR),
 	capabilityCheck("PTR", providers.CanUsePTR),
@@ -695,6 +724,7 @@ var providerCapabilityChecks = []pairTypeCapability{
 	capabilityCheck("SOA", providers.CanUseSOA),
 	capabilityCheck("SRV", providers.CanUseSRV),
 	capabilityCheck("SSHFP", providers.CanUseSSHFP),
+	capabilityCheck("SVCB", providers.CanUseSVCB),
 	capabilityCheck("TLSA", providers.CanUseTLSA),
 
 	// DS needs special record-level checks

@@ -7,19 +7,16 @@ import (
 
 	"github.com/StackExchange/dnscontrol/v4/models"
 	"github.com/StackExchange/dnscontrol/v4/pkg/diff"
-	"github.com/StackExchange/dnscontrol/v4/pkg/diff2"
-	"github.com/StackExchange/dnscontrol/v4/pkg/printer"
 	"github.com/StackExchange/dnscontrol/v4/providers"
 	"github.com/miekg/dns"
 )
 
-var nameServerSuffixes = []string{
-	".nsone.net.",
-}
-
 var features = providers.DocumentationNotes{
+	// The default for unlisted capabilities is 'Cannot'.
+	// See providers/capabilities.go for the entire list of capabilities.
 	providers.CanAutoDNSSEC:          providers.Cannot(),
 	providers.CanGetZones:            providers.Can(),
+	providers.CanConcur:              providers.Can(),
 	providers.CanUseAlias:            providers.Can(),
 	providers.CanUseCAA:              providers.Can(),
 	providers.CanUseDS:               providers.Cannot(),
@@ -36,13 +33,16 @@ var features = providers.DocumentationNotes{
 }
 
 func init() {
+	const providerName = "NETLIFY"
+	const providerMaintainer = "@SphericalKat"
 	fns := providers.DspFuncs{
 		Initializer:   newNetlify,
 		RecordAuditor: AuditRecords,
 	}
-	providers.RegisterDomainServiceProviderType("NETLIFY", fns, features)
-	providers.RegisterCustomRecordType("NETLIFY", "NETLIFY", "")
-	providers.RegisterCustomRecordType("NETLIFYv6", "NETLIFY", "")
+	providers.RegisterDomainServiceProviderType(providerName, fns, features)
+	providers.RegisterCustomRecordType(providerName, providerName, "")
+	providers.RegisterCustomRecordType("NETLIFYv6", providerName, "")
+	providers.RegisterMaintainer(providerName, providerMaintainer)
 }
 
 type netlifyProvider struct {
@@ -144,58 +144,33 @@ func (n *netlifyProvider) GetZoneRecords(domain string, meta map[string]string) 
 	return cleanRecords, nil
 }
 
-// Return true if the string ends in one of Netlify's name server domains
-// False if anything else
-func isNetlifyNameServerDomain(name string) bool {
-	for _, i := range nameServerSuffixes {
-		if strings.HasSuffix(name, i) {
-			return true
-		}
+// ListZones returns all DNS zones managed by this provider.
+func (n *netlifyProvider) ListZones() ([]string, error) {
+	zones, err := n.getDNSZones()
+	if err != nil {
+		return nil, err
 	}
-	return false
-}
 
-// remove all non-netlify NS records from our desired state.
-// if any are found, print a warning
-func removeOtherApexNS(dc *models.DomainConfig) {
-	newList := make([]*models.RecordConfig, 0, len(dc.Records))
-	for _, rec := range dc.Records {
-		if rec.Type == "NS" {
-			// apex NS inside netlify are expected.
-			// We ignore them, warning as needed.
-			// Child delegations are supported so, we allow non-apex NS records.
-			if rec.GetLabelFQDN() == dc.Name {
-				if !isNetlifyNameServerDomain(rec.GetTargetField()) {
-					printer.Printf("Warning: Netlify does not allow NS records to be modified. %s will not be added.\n", rec.GetTargetField())
-				}
-				continue
-			}
-		}
-		newList = append(newList, rec)
+	zoneNames := make([]string, len(zones))
+	for i, z := range zones {
+		zoneNames[i] = z.Name
 	}
-	dc.Records = newList
+
+	return zoneNames, nil
 }
 
 // GetZoneRecordsCorrections returns a list of corrections that will turn existing records into dc.Records.
-func (n *netlifyProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, records models.Records) ([]*models.Correction, error) {
-
-	removeOtherApexNS(dc)
-
-	var corrections []*models.Correction
-	var differ diff.Differ
-	if !diff2.EnableDiff2 {
-		differ = diff.New(dc)
-	} else {
-		differ = diff.NewCompat(dc)
-	}
-	_, create, del, modify, err := differ.IncrementalDiff(records)
+func (n *netlifyProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, records models.Records) ([]*models.Correction, int, error) {
+	toReport, create, del, modify, actualChangeCount, err := diff.NewCompat(dc).IncrementalDiff(records)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
+	// Start corrections with the reports
+	corrections := diff.GenerateMessageCorrections(toReport)
 
 	zone, err := n.getZone(dc.Name)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	// Deletes first so changing type works etc.
@@ -239,7 +214,7 @@ func (n *netlifyProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, rec
 		corrections = append(corrections, corr)
 	}
 
-	return corrections, nil
+	return corrections, actualChangeCount, nil
 }
 
 func toReq(rc *models.RecordConfig) *dnsRecordCreate {

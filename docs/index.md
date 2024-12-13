@@ -32,7 +32,7 @@ title: DNSControl
          Use macros and variables for easier updates.
          <!-- Optimize your SPF records. -->
          Upload your zones to
-         <strong><a href="https://docs.dnscontrol.org/service-providers/providers">multiple DNS providers</a></strong>.
+         <strong><a href="https://docs.dnscontrol.org/provider">multiple DNS providers</a></strong>.
     </p>
     </div>
 
@@ -85,7 +85,7 @@ title: DNSControl
                       <a href="https://docs.dnscontrol.org/getting-started/getting-started">Getting Started</a>: A walk-through of the basics
                 </li>
                 <li>
-                    <a href="https://docs.dnscontrol.org/service-providers/providers">Providers</a>: Which DNS providers are supported
+                    <a href="https://docs.dnscontrol.org/provider">Providers</a>: Which DNS providers are supported
                 </li>
                 <li>
                     <a href="https://docs.dnscontrol.org/getting-started/examples">Examples</a>: The DNSControl language by example
@@ -137,10 +137,10 @@ title: DNSControl
                     <a href="https://docs.dnscontrol.org/developer-info/alias">Aliases</a>: ALIAS/ANAME records
                 </li>
                 <li>
-                    <a href="https://docs.dnscontrol.org/language-reference/record-modifiers/spf_builder">SPF Optimizer</a>: Optimize your SPF records
+                    <a href="https://docs.dnscontrol.org/language-reference/domain-modifiers/spf_builder">SPF Optimizer</a>: Optimize your SPF records
                 </li>
                 <li>
-                    <a href="https://docs.dnscontrol.org/language-reference/record-modifiers/caa_builder">CAA Builder</a>: Build CAA records the easy way
+                    <a href="https://docs.dnscontrol.org/language-reference/domain-modifiers/caa_builder">CAA Builder</a>: Build CAA records the easy way
                 </li>
             </ul>
         </div>
@@ -205,6 +205,9 @@ title: DNSControl
                 </li>
                 <li>
                     <a href="https://docs.dnscontrol.org/developer-info/adding-new-rtypes">Step-by-Step Guide: Adding new DNS rtypes</a>: How to add a new DNS record type
+                </li>
+                <li>
+                    <a href="https://docs.dnscontrol.org/developer-info/ordering">DNS reordering</a>: How DNSControl determines the order of the changes
                 </li>
             </ul>
         </div>

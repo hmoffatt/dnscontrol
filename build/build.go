@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"time"
 )
 
 var sha = flag.String("sha", "", "SHA of current commit")
@@ -16,7 +15,7 @@ var goos = flag.String("os", "", "OS to build (linux, windows, or darwin) Defaul
 
 func main() {
 	flag.Parse()
-	flags := fmt.Sprintf(`-s -w -X "main.SHA=%s" -X main.BuildTime=%d`, getVersion(), time.Now().Unix())
+	flags := fmt.Sprintf(`-s -w -X "main.version=%s"`, getVersion())
 	pkg := "github.com/StackExchange/dnscontrol/v4"
 
 	build := func(out, goos string) {
@@ -24,8 +23,15 @@ func main() {
 		cmd := exec.Command("go", "build", "-o", out, "-ldflags", flags, pkg)
 		os.Setenv("GOOS", goos)
 		os.Setenv("GO111MODULE", "on")
+		os.Setenv("CGO_ENABLED", "0")
 		cmd.Stderr = os.Stderr
 		cmd.Stdout = os.Stdout
+
+		// For now just build for amd64 everywhere
+		if os.Getenv("GOARCH") == "" {
+			os.Setenv("GOARCH", "amd64")
+		}
+
 		err := cmd.Run()
 		if err != nil {
 			log.Fatal(err)

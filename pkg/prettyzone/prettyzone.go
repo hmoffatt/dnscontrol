@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/StackExchange/dnscontrol/v4/models"
+	"github.com/StackExchange/dnscontrol/v4/pkg/txtutil"
 	"github.com/miekg/dns"
 )
 
@@ -41,16 +42,6 @@ func MostCommonTTL(records models.Records) uint32 {
 		}
 	}
 	return mk
-}
-
-// WriteZoneFileRR is a helper for when you have []dns.RR instead of models.Records
-func WriteZoneFileRR(w io.Writer, records []dns.RR, origin string) error {
-	rcs, err := models.RRstoRCs(records, origin)
-	if err != nil {
-		return err
-	}
-
-	return WriteZoneFileRC(w, rcs, origin, 0, nil)
 }
 
 // WriteZoneFileRC writes a beautifully formatted zone file.
@@ -136,9 +127,12 @@ func (z *ZoneGenData) generateZoneFileHelper(w io.Writer) error {
 
 		// type
 		typeStr := rr.Type
+		if rr.Type == "UNKNOWN" {
+			typeStr = rr.UnknownTypeName
+		}
 
 		// the remaining line
-		target := rr.GetTargetCombined()
+		target := rr.GetTargetCombinedFunc(txtutil.EncodeQuoted)
 
 		// comment
 		comment := ""

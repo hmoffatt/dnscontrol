@@ -178,9 +178,8 @@ The `--creds` flag allows you to specify a different file name.
 * Do not end the filename with `.yaml` or `.yml` as some day we hope to support YAML.
 * Rather than specifying a file, you can specify a program or shell command to be run. The output of the program/command must be valid JSON and will be read the same way.
   * If the name begins with `!`, the remainder of the name is taken to be a shell command or program to be run.
-  * If the name is a file that is executable (chmod `+x` bit), it is taken as the command to be run.
+  * If the name is a file that is executable (chmod `+x` bit), it is taken as the command to be run (Linux/MacOS only).
   * Exceptions: The `x` bit is not checked if the filename ends with `.yaml`, `.yml` or `.json`.
-  * Windows: Executing an external script isn't supported. There's no code that prevents it from trying, but it isn't supported.
 
 ### Example commands
 
@@ -198,14 +197,14 @@ dnscontrol preview --creds /some/absolute/path/creds.sh
 Following commands would execute a shell command:
 
 ```shell
-dnscontrol preview --creds "!op inject -i creds.json.tpl"
+dnscontrol preview --creds '!op inject -i creds.json.tpl'
 ```
 
 This example requires the [1Password command-line tool](https://developer.1password.com/docs/cli/)
 but works with any shell command that returns a properly formatted `creds.json`.
 In this case, the 1Password CLI is used to inject the secrets from
 a 1Password vault, rather than storing them in environment variables.
-An example of a template file containing Linode and Cloudflare API credentials is available here: [creds.json](https://github.com/StackExchange/dnscontrol/blob/master/documentation/assets/1password/creds.json).
+An example of a template file containing Linode and Cloudflare API credentials is available here: [creds.json](https://github.com/StackExchange/dnscontrol/blob/main/documentation/assets/1password/creds.json).
 
 {% code title="creds.json" %}
 ```json
@@ -226,13 +225,14 @@ An example of a template file containing Linode and Cloudflare API credentials i
 ```
 {% endcode %}
 
-## Don't store secrets in a Git repo!
+## Don't store creds.json in a Git repo!
 
-Do NOT store secrets in a Git repository. That is not secure. For example,
-storing the example `cloudflare_tal` is insecure because anyone with access to
-your Git repository or the history will know your apiuser is `REDACTED`.
-Removing secrets accidentally stored in Git is very difficult. You'll probably
-give up and re-create the repo and lose all history.
+Do NOT store `creds.json` (or any secrets!) in a Git repository. That is not secure.
 
-Instead, use environment variables as in the `hexonet` example above.  Use
+For example, storing the creds.json at the top of this document would be horribly insecure.
+Anyone with access to your Git repository *or the history* will know your apiuser is `REDACTED`.
+Removing secrets accidentally stored in Git is very difficult because you'll need to rewrite
+the repo history.
+
+A better way is to use environment variables as in the `hexonet` example above.  Use
 secure means to distribute the names and values of the environment variables.

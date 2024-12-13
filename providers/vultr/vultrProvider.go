@@ -11,7 +11,6 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/StackExchange/dnscontrol/v4/models"
-	"github.com/StackExchange/dnscontrol/v4/pkg/diff"
 	"github.com/StackExchange/dnscontrol/v4/pkg/diff2"
 	"github.com/StackExchange/dnscontrol/v4/providers"
 	"github.com/vultr/govultr/v2"
@@ -27,7 +26,10 @@ Info required in `creds.json`:
 */
 
 var features = providers.DocumentationNotes{
+	// The default for unlisted capabilities is 'Cannot'.
+	// See providers/capabilities.go for the entire list of capabilities.
 	providers.CanGetZones:            providers.Can(),
+	providers.CanConcur:              providers.Cannot(),
 	providers.CanUseAlias:            providers.Cannot(),
 	providers.CanUseCAA:              providers.Can(),
 	providers.CanUseLOC:              providers.Cannot(),
@@ -40,11 +42,14 @@ var features = providers.DocumentationNotes{
 }
 
 func init() {
+	const providerName = "VULTR"
+	const providerMaintainer = "@pgaskin"
 	fns := providers.DspFuncs{
 		Initializer:   NewProvider,
 		RecordAuditor: AuditRecords,
 	}
-	providers.RegisterDomainServiceProviderType("VULTR", fns, features)
+	providers.RegisterDomainServiceProviderType(providerName, fns, features)
+	providers.RegisterMaintainer(providerName, providerMaintainer)
 }
 
 // vultrProvider represents the Vultr DNSServiceProvider.
@@ -110,7 +115,8 @@ func (api *vultrProvider) GetZoneRecords(domain string, meta map[string]string) 
 }
 
 // GetZoneRecordsCorrections returns a list of corrections that will turn existing records into dc.Records.
-func (api *vultrProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, curRecords models.Records) ([]*models.Correction, error) {
+func (api *vultrProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, curRecords models.Records) ([]*models.Correction, int, error) {
+	var corrections []*models.Correction
 
 	for _, rec := range dc.Records {
 		switch rec.Type { // #rtype_variations
@@ -118,7 +124,7 @@ func (api *vultrProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, cur
 			// These rtypes are hostnames, therefore need to be converted (unlike, for example, an AAAA record)
 			t, err := idna.ToUnicode(rec.GetTargetField())
 			if err != nil {
-				return nil, err
+				return nil, 0, err
 			}
 			rec.SetTarget(t)
 		default:
@@ -126,52 +132,9 @@ func (api *vultrProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, cur
 		}
 	}
 
-	var corrections []*models.Correction
-	if !diff2.EnableDiff2 {
-		differ := diff.New(dc)
-		_, create, toDelete, modify, err := differ.IncrementalDiff(curRecords)
-
-		if err != nil {
-			return nil, err
-		}
-
-		for _, mod := range toDelete {
-			id := mod.Existing.Original.(govultr.DomainRecord).ID
-			corrections = append(corrections, &models.Correction{
-				Msg: fmt.Sprintf("%s; Vultr RecordID: %v", mod.String(), id),
-				F: func() error {
-					return api.client.DomainRecord.Delete(context.Background(), dc.Name, id)
-				},
-			})
-		}
-
-		for _, mod := range modify {
-			r := toVultrRecord(dc, mod.Desired, mod.Existing.Original.(govultr.DomainRecord).ID)
-			corrections = append(corrections, &models.Correction{
-				Msg: fmt.Sprintf("%s; Vultr RecordID: %v", mod.String(), r.ID),
-				F: func() error {
-					return api.client.DomainRecord.Update(context.Background(), dc.Name, r.ID, &govultr.DomainRecordReq{Name: r.Name, Type: r.Type, Data: r.Data, TTL: r.TTL, Priority: &r.Priority})
-				},
-			})
-		}
-
-		for _, mod := range create {
-			r := toVultrRecord(dc, mod.Desired, "0")
-			corrections = append(corrections, &models.Correction{
-				Msg: mod.String(),
-				F: func() error {
-					_, err := api.client.DomainRecord.Create(context.Background(), dc.Name, &govultr.DomainRecordReq{Name: r.Name, Type: r.Type, Data: r.Data, TTL: r.TTL, Priority: &r.Priority})
-					return err
-				},
-			})
-		}
-		return corrections, nil
-	}
-
-	changes, err := diff2.ByRecord(curRecords, dc, nil)
-
+	changes, actualChangeCount, err := diff2.ByRecord(curRecords, dc, nil)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	for _, change := range changes {
@@ -179,7 +142,7 @@ func (api *vultrProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, cur
 		case diff2.REPORT:
 			corrections = append(corrections, &models.Correction{Msg: change.MsgsJoined})
 		case diff2.CREATE:
-			r := toVultrRecord(dc, change.New[0], "0")
+			r := toVultrRecord(change.New[0], "0")
 			corrections = append(corrections, &models.Correction{
 				Msg: change.Msgs[0],
 				F: func() error {
@@ -188,7 +151,7 @@ func (api *vultrProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, cur
 				},
 			})
 		case diff2.CHANGE:
-			r := toVultrRecord(dc, change.New[0], change.Old[0].Original.(govultr.DomainRecord).ID)
+			r := toVultrRecord(change.New[0], change.Old[0].Original.(govultr.DomainRecord).ID)
 			corrections = append(corrections, &models.Correction{
 				Msg: fmt.Sprintf("%s; Vultr RecordID: %v", change.Msgs[0], r.ID),
 				F: func() error {
@@ -208,7 +171,7 @@ func (api *vultrProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, cur
 		}
 	}
 
-	return corrections, nil
+	return corrections, actualChangeCount, nil
 }
 
 // GetNameservers gets the Vultr nameservers for a domain
@@ -313,7 +276,7 @@ func toRecordConfig(domain string, r govultr.DomainRecord) (*models.RecordConfig
 }
 
 // toVultrRecord converts a RecordConfig converted by toRecordConfig back to a Vultr DomainRecordReq. #rtype_variations
-func toVultrRecord(dc *models.DomainConfig, rc *models.RecordConfig, vultrID string) *govultr.DomainRecord {
+func toVultrRecord(rc *models.RecordConfig, vultrID string) *govultr.DomainRecord {
 	name := rc.GetLabel()
 	// Vultr uses a blank string to represent the apex domain.
 	if name == "@" {
@@ -356,7 +319,7 @@ func toVultrRecord(dc *models.DomainConfig, rc *models.RecordConfig, vultrID str
 		// Vultr doesn't permit TXT strings to include double-quotes
 		// therefore, we don't have to escape interior double-quotes.
 		// Vultr's API requires the string to begin and end with double-quotes.
-		r.Data = `"` + strings.Join(rc.TxtStrings, "") + `"`
+		r.Data = `"` + strings.Join(rc.GetTargetTXTSegmented(), "") + `"`
 	default:
 	}
 

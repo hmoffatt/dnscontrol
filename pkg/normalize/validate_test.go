@@ -41,35 +41,34 @@ func TestCheckSoa(t *testing.T) {
 		minttl  uint32
 		refresh uint32
 		retry   uint32
-		serial  uint32
 		mbox    string
 	}{
 		// Expire
-		{false, 123, 123, 123, 123, 123, "foo.bar.com."},
-		{true, 0, 123, 123, 123, 123, "foo.bar.com."},
+		{false, 123, 123, 123, 123, "foo.bar.com."},
+		{true, 0, 123, 123, 123, "foo.bar.com."},
 		// MinTTL
-		{false, 123, 123, 123, 123, 123, "foo.bar.com."},
-		{true, 123, 0, 123, 123, 123, "foo.bar.com."},
+		{false, 123, 123, 123, 123, "foo.bar.com."},
+		{true, 123, 0, 123, 123, "foo.bar.com."},
 		// Refresh
-		{false, 123, 123, 123, 123, 123, "foo.bar.com."},
-		{true, 123, 123, 0, 123, 123, "foo.bar.com."},
+		{false, 123, 123, 123, 123, "foo.bar.com."},
+		{true, 123, 123, 0, 123, "foo.bar.com."},
 		// Retry
-		{false, 123, 123, 123, 123, 123, "foo.bar.com."},
-		{true, 123, 123, 123, 0, 123, "foo.bar.com."},
+		{false, 123, 123, 123, 123, "foo.bar.com."},
+		{true, 123, 123, 123, 0, "foo.bar.com."},
 		// Serial
-		{false, 123, 123, 123, 123, 123, "foo.bar.com."},
-		{false, 123, 123, 123, 123, 0, "foo.bar.com."},
+		{false, 123, 123, 123, 123, "foo.bar.com."},
+		{false, 123, 123, 123, 123, "foo.bar.com."},
 		// MBox
-		{true, 123, 123, 123, 123, 123, ""},
-		{true, 123, 123, 123, 123, 123, "foo@bar.com."},
-		{false, 123, 123, 123, 123, 123, "foo.bar.com."},
+		{true, 123, 123, 123, 123, ""},
+		{true, 123, 123, 123, 123, "foo@bar.com."},
+		{false, 123, 123, 123, 123, "foo.bar.com."},
 	}
 
 	for _, test := range tests {
-		experiment := fmt.Sprintf("%d %d %d %d %d %s", test.expire, test.minttl, test.refresh,
-			test.retry, test.serial, test.mbox)
+		experiment := fmt.Sprintf("%d %d %d %d %s", test.expire, test.minttl, test.refresh,
+			test.retry, test.mbox)
 		t.Run(experiment, func(t *testing.T) {
-			err := checkSoa(test.expire, test.minttl, test.refresh, test.retry, test.serial, test.mbox)
+			err := checkSoa(test.expire, test.minttl, test.refresh, test.retry, test.mbox)
 			checkError(t, err, test.isError, experiment)
 		})
 	}
@@ -102,7 +101,7 @@ func TestCheckLabel(t *testing.T) {
 			if test.hasSkipMeta {
 				meta["skip_fqdn_check"] = "true"
 			}
-			err := checkLabel(test.label, test.rType, test.target, "foo.tld", meta)
+			err := checkLabel(test.label, test.rType, "foo.tld", meta)
 			if err != nil && !test.isError {
 				t.Errorf("%02d: Expected no error but got %s", i, err)
 			}
@@ -175,9 +174,55 @@ func Test_transform_cname(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		actual := transformCNAME(test.experiment, "old.com", "new.com")
+		actual := transformCNAME(test.experiment, "old.com", "new.com", "")
 		if test.expected != actual {
 			t.Errorf("%v: expected (%v) got (%v)\n", test.experiment, test.expected, actual)
+		}
+	}
+}
+
+func Test_transform_cname_strip(t *testing.T) {
+	var tests = []struct {
+		p        []string
+		expected string
+	}{
+		{[]string{"ai.meta.stackexchange.com.", "stackexchange.com", "com.internal", "com"},
+			"ai.meta.stackexchange.com.internal."},
+		{[]string{"askubuntu.com.", "askubuntu.com", "com.internal", "com"},
+			"askubuntu.com.internal."},
+		{[]string{"blogoverflow.com.", "stackoverflow.com", "com.internal", "com"},
+			"blogoverflow.com.internal."},
+		{[]string{"careers.stackoverflow.com.", "stackoverflow.com", "com.internal", "com"},
+			"careers.stackoverflow.com.internal."},
+		{[]string{"chat.stackexchange.com.", "askubuntu.com", "com.internal", "com"},
+			"chat.stackexchange.com.internal."},
+		{[]string{"chat.stackexchange.com.", "stackoverflow.com", "com.internal", "com"},
+			"chat.stackexchange.com.internal."},
+		{[]string{"chat.stackexchange.com.", "superuser.com", "com.internal", "com"},
+			"chat.stackexchange.com.internal."},
+		{[]string{"sstatic.net.", "sstatic.net", "net.internal", "net"},
+			"sstatic.net.internal."},
+		{[]string{"stackapps.com.", "stackapps.com", "com.internal", "com"},
+			"stackapps.com.internal."},
+		{[]string{"stackexchange.com.", "stackexchange.com", "com.internal", "com"},
+			"stackexchange.com.internal."},
+		{[]string{"stackoverflow.com.", "stackoverflow.com", "com.internal", "com"},
+			"stackoverflow.com.internal."},
+		{[]string{"superuser.com.", "superuser.com", "com.internal", "com"},
+			"superuser.com.internal."},
+		{[]string{"teststackoverflow.com.", "teststackoverflow.com", "com.internal", "com"},
+			"teststackoverflow.com.internal."},
+		{[]string{"webapps.stackexchange.com.", "stackexchange.com", "com.internal", "com"},
+			"webapps.stackexchange.com.internal."},
+		//
+		{[]string{"sstatic.net.", "sstatic.net", "com.internal", "com"},
+			"sstatic.net.internal."},
+	}
+
+	for _, test := range tests {
+		actual := transformCNAME(test.p[0], test.p[1], test.p[2], test.p[3])
+		if test.expected != actual {
+			t.Errorf("%v: expected (%v) got (%v)\n", test.p, test.expected, actual)
 		}
 	}
 }
@@ -314,17 +359,15 @@ func TestCheckDuplicates(t *testing.T) {
 		// The only difference is the rType:
 		makeRC("aaa", "example.com", "uniquestring.com.", models.RecordConfig{Type: "NS"}),
 		makeRC("aaa", "example.com", "uniquestring.com.", models.RecordConfig{Type: "PTR"}),
-		// The only difference is the TTL.
-		makeRC("zzz", "example.com", "4.4.4.4", models.RecordConfig{Type: "A", TTL: 111}),
-		makeRC("zzz", "example.com", "4.4.4.4", models.RecordConfig{Type: "A", TTL: 222}),
 		// Three records each with a different target.
 		makeRC("@", "example.com", "ns1.foo.com.", models.RecordConfig{Type: "NS"}),
 		makeRC("@", "example.com", "ns2.foo.com.", models.RecordConfig{Type: "NS"}),
 		makeRC("@", "example.com", "ns3.foo.com.", models.RecordConfig{Type: "NS"}),
+		// NOTE: The comparison ignores ttl. Therefore we don't test that.
 	}
 	errs := checkDuplicates(records)
 	if len(errs) != 0 {
-		t.Errorf("Expect duplicate NOT found but found %q", errs)
+		t.Errorf("Expected duplicate NOT found but found %q", errs)
 	}
 }
 
@@ -411,7 +454,7 @@ func TestCheckRecordSetHasMultipleTTLs_err_3type_2ttl(t *testing.T) {
 	}
 	errs := checkRecordSetHasMultipleTTLs(records)
 	if len(errs) != 0 {
-		t.Errorf("Expected 0 errors (differnt types, no errors), but got %d: %v", len(errs), errs)
+		t.Errorf("Expected 0 errors (different types, no errors), but got %d: %v", len(errs), errs)
 	}
 }
 
@@ -424,7 +467,7 @@ func TestCheckRecordSetHasMultipleTTLs_err_3type_3ttl(t *testing.T) {
 	}
 	errs := checkRecordSetHasMultipleTTLs(records)
 	if len(errs) != 1 {
-		t.Errorf("Expected 0 errors (differnt types, 1 error), but got %d: %v", len(errs), errs)
+		t.Errorf("Expected 0 errors (different types, 1 error), but got %d: %v", len(errs), errs)
 	}
 }
 

@@ -2,18 +2,18 @@
 
 ## Where are the docs?
 
-TL;DR version: [`docs`](https://github.com/StackExchange/dnscontrol/tree/master/docs) is the [marketing website](https://dnscontrol.org). [`documentation`](https://github.com/StackExchange/dnscontrol/tree/master/documentation) is the [docs.dnscontrol.org](https://docs.dnscontrol.org/) website. (Yes, the names are backwards!)
+TL;DR version: [`docs`](https://github.com/StackExchange/dnscontrol/tree/main/docs) is the [marketing website](https://dnscontrol.org). [`documentation`](https://github.com/StackExchange/dnscontrol/tree/main/documentation) is the [docs.dnscontrol.org](https://docs.dnscontrol.org/) website. (Yes, the names are backwards!)
 
 **The two websites**
 
 1. <https://dnscontrol.org/>
    * The main website
-   * Source code: [`docs`](https://github.com/StackExchange/dnscontrol/tree/master/docs)
+   * Source code: [`docs`](https://github.com/StackExchange/dnscontrol/tree/main/docs)
    * Mostly "marketing" for the project.
    * Rarely changes.  Updated via GitHub "pages" feature.
 2. <https://docs.dnscontrol.org/>
    * Project documentation
-   * Source code: [`documentation`](https://github.com/StackExchange/dnscontrol/tree/master/documentation)
+   * Source code: [`documentation`](https://github.com/StackExchange/dnscontrol/tree/main/documentation)
    * Users and developer documentation
    * Changes frequently.  Updated via [GitBook](https://www.gitbook.com/)
 
@@ -21,19 +21,56 @@ TL;DR version: [`docs`](https://github.com/StackExchange/dnscontrol/tree/master/
 
 Within the git repo, docs are grouped:
 
-* [`documentation/`](https://github.com/StackExchange/dnscontrol/tree/master/documentation): general docs
-* [`documentation/providers/`](https://github.com/StackExchange/dnscontrol/tree/master/documentation/providers/): One file per provider
-* [`documentation/functions/`](https://github.com/StackExchange/dnscontrol/tree/master/documentation/functions/): One file per `dnsconfig.js` language feature
-* [`documentation/assets/FOO/`](https://github.com/StackExchange/dnscontrol/tree/master/documentation/assets/): Images for page FOO(PNGs only, please!)
+* [`documentation/`](https://github.com/StackExchange/dnscontrol/tree/main/documentation): general docs
+* [`documentation/provider/`](https://github.com/StackExchange/dnscontrol/tree/main/documentation/provider/): One file per provider
+* [`documentation/language-reference/`](https://github.com/StackExchange/dnscontrol/tree/main/documentation/language-reference/): One file per `dnsconfig.js` language feature
+* [`documentation/assets/FOO/`](https://github.com/StackExchange/dnscontrol/tree/main/documentation/assets/): Images for page FOO(PNGs only, please!)
 
 ## How to add a new page?
 
 1. Add the page to the `documentation` folder (possibly a sub folder)
 2. List the page in `SUMMARY.md` so that it will appear in the table of contents, sidebar, etc.
 
-## Documentation previews
+## Top-of-Document parameters
 
-> "Preview links are only accessible by GitBook users. We're working on a feature that will allow preview links to be viewable by anyone who accesses the PR." — _[GitBook](https://docs.gitbook.com/product-tour/git-sync/github-pull-request-preview#how-to-access-preview-links)_
+Files in the `documentation/language-reference/{record,domain,global}` subdirectories
+have a header at the top that is used to populate other systems.
+
+Here's an example from [`A`](language-reference/domain-modifiers/A.md)
+
+```
+---
+name: A
+provider: NAMEDOTCOM
+parameters:
+  - name
+  - address
+  - modifiers...
+parameter_types:
+  name: string
+  address: string | number
+  "modifiers...": RecordModifier[]
+---
+```
+
+* `name`: The name of the function/constant in the document. This should match the filename (aside from the `.md` suffix).
+* `parameters`: These are the names of the parameters that the function accepts. `modifiers...` indicates that a variable number of modifiers can be added.
+* `parameter_types`: The typescript type for each parameter. This is used when generating `types-dnscontrol.d.ts`
+* `provider`: If a feature is only available for one provider
+
+## GitHub pull request preview
+
+When you submit a GitHub pull request, you can view the result in advance. This allows you to check the impact of changes.
+
+![](assets/styleguide-doc/pull-request-preview.webp)
+
+### How to access preview links
+
+For every pull request, you’ll see a status added to the GitHub pull request with a unique preview URL. Clicking the **Details** link on the status will take you to the preview URL for your content. You can then make sure the content is as expected.
+
+{% hint style="info" %}
+**NOTE**: A new preview URL is created for every git update. Please check the GitHub status for the most up to date URL.
+{% endhint %}
 
 ## Formatting tips
 
@@ -43,9 +80,9 @@ Break lines every 80 chars.
 
 Include a blank line between paragraphs.
 
-Leave one blank line before and after a heading.
+Leave exactly one blank line before and after a heading.
 
-Javascript code should use double quotes (`"`) for strings, not single quotes
+JavaScript code should use double quotes (`"`) for strings, not single quotes
 (`'`).  They are equivalent but consistency is good.
 
 ### Headings
@@ -84,8 +121,8 @@ var REG_NONE = NewRegistrar("none");
 var DNS_BIND = NewDnsProvider("bind");
 
 D("example.com", REG_NONE, DnsProvider(DNS_BIND),
-    A("@", "1.2.3.4")
-);
+    A("@", "1.2.3.4"),
+END);
 ```
 {% endcode %}
 
@@ -156,7 +193,7 @@ However, the first mention on a page should always
 be a link.  Others are at the authors digression.
 
 ```markdown
-The [`PTR`](functions/domain/PTR.md) feature is helpful in LANs.
+The [`PTR`](language-reference/domain-modifiers/PTR.md) feature is helpful in LANs.
 ```
 
 #### Mentioning functions from the Source code
@@ -170,7 +207,7 @@ The function `GetRegistrarCorrections()` returns...
 #### Internal links
 
 ```markdown
-Blah blah blah [M365_BUILDER](functions/record/M365_BUILDER.md)
+Blah blah blah [M365_BUILDER](language-reference/domain-modifiers/M365_BUILDER.md)
 ```
 
 {% hint style="info" %}
@@ -190,6 +227,13 @@ Blah blah blah <https://www.google.com> blah blah.
 ```markdown
 Blah blah blah [a search engine](https://www.google.com) blah blah.
 ```
+
+## Capitalization matters
+
+Please capitalize these terms as you see them here:
+
+  * DNSControl
+  * GitHub
 
 ## Proofreading
 

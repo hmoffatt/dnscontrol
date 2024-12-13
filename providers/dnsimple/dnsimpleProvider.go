@@ -5,22 +5,26 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/StackExchange/dnscontrol/v4/models"
 	"github.com/StackExchange/dnscontrol/v4/pkg/diff"
-	"github.com/StackExchange/dnscontrol/v4/pkg/diff2"
 	"github.com/StackExchange/dnscontrol/v4/pkg/printer"
+	"github.com/StackExchange/dnscontrol/v4/pkg/txtutil"
 	"github.com/StackExchange/dnscontrol/v4/providers"
 	dnsimpleapi "github.com/dnsimple/dnsimple-go/dnsimple"
 	"golang.org/x/oauth2"
 )
 
 var features = providers.DocumentationNotes{
+	// The default for unlisted capabilities is 'Cannot'.
+	// See providers/capabilities.go for the entire list of capabilities.
 	providers.CanAutoDNSSEC:          providers.Can(),
 	providers.CanGetZones:            providers.Can(),
+	providers.CanConcur:              providers.Cannot(),
 	providers.CanUseAlias:            providers.Can(),
 	providers.CanUseCAA:              providers.Can(),
 	providers.CanUseDS:               providers.Cannot(),
@@ -37,19 +41,22 @@ var features = providers.DocumentationNotes{
 }
 
 func init() {
-	providers.RegisterRegistrarType("DNSIMPLE", newReg)
+	const providerName = "DNSIMPLE"
+	const providerMaintainer = "@onlyhavecans"
+	providers.RegisterRegistrarType(providerName, newReg)
 	fns := providers.DspFuncs{
 		Initializer:   newDsp,
 		RecordAuditor: AuditRecords,
 	}
-	providers.RegisterDomainServiceProviderType("DNSIMPLE", fns, features)
+	providers.RegisterDomainServiceProviderType(providerName, fns, features)
+	providers.RegisterMaintainer(providerName, providerMaintainer)
 }
 
 const stateRegistered = "registered"
 
 var defaultNameServerNames = []string{
 	"ns1.dnsimple.com",
-	"ns2.dnsimple.com",
+	"ns2.dnsimple-edge.net",
 	"ns3.dnsimple.com",
 	"ns4.dnsimple-edge.org",
 }
@@ -91,13 +98,22 @@ func (c *dnsimpleProvider) GetZoneRecords(domain string, meta map[string]string)
 			r.Name = "@"
 		}
 
-		if r.Type == "CNAME" || r.Type == "MX" || r.Type == "ALIAS" || r.Type == "NS" {
+		if r.Type == "CNAME" || r.Type == "ALIAS" || r.Type == "NS" {
+			r.Content += "."
+		} else if r.Type == "MX" && r.Content != "." {
 			r.Content += "."
 		}
 
 		// DNSimple adds TXT records that mirror the alias records.
 		// They manage them on ALIAS updates, so pretend they don't exist
-		if r.Type == "TXT" && strings.HasPrefix(r.Content, "ALIAS for ") {
+		if r.Type == "TXT" && strings.HasPrefix(r.Content, `"ALIAS for `) {
+			continue
+		}
+		// This second check is the same of before, but it exists for compatibility purpose.
+		// Until Nov 2023 DNSimple did not normalize TXT records, and they used to store TXT records without quotes.
+		//
+		// This is a backward-compatible function to facilitate the TXT transition.
+		if r.Type == "TXT" && strings.HasPrefix(r.Content, `ALIAS for `) {
 			continue
 		}
 
@@ -121,7 +137,12 @@ func (c *dnsimpleProvider) GetZoneRecords(domain string, meta map[string]string)
 		case "SRV":
 			err = rec.SetTargetSRVPriorityString(uint16(r.Priority), r.Content)
 		case "TXT":
-			err = rec.SetTargetTXT(r.Content)
+			// This is a backward-compatible function to facilitate the TXT transition.
+			if isQuotedTXT(r.Content) {
+				err = rec.PopulateFromStringFunc(r.Type, r.Content, domain, txtutil.ParseQuoted)
+			} else {
+				err = rec.SetTargetTXT(fmt.Sprintf("legacy: %s", r.Content))
+			}
 		default:
 			err = rec.PopulateFromString(r.Type, r.Content, domain)
 		}
@@ -139,27 +160,22 @@ func (c *dnsimpleProvider) GetZoneRecords(domain string, meta map[string]string)
 	return cleanedRecords, nil
 }
 
-func (c *dnsimpleProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, actual models.Records) ([]*models.Correction, error) {
-	var corrections []*models.Correction
-
+func (c *dnsimpleProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, actual models.Records) ([]*models.Correction, int, error) {
 	removeOtherApexNS(dc)
 
 	dnssecFixes, err := c.getDNSSECCorrections(dc)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	corrections = append(corrections, dnssecFixes...)
 
-	var differ diff.Differ
-	if !diff2.EnableDiff2 {
-		differ = diff.New(dc)
-	} else {
-		differ = diff.NewCompat(dc)
-	}
-	_, create, del, modify, err := differ.IncrementalDiff(actual)
+	toReport, create, del, modify, actualChangeCount, err := diff.NewCompat(dc).IncrementalDiff(actual)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
+	// Start corrections with the reports
+	corrections := diff.GenerateMessageCorrections(toReport)
+	// Next dnsSec fixes
+	corrections = append(corrections, dnssecFixes...)
 
 	for _, del := range del {
 		rec := del.Existing.Original.(dnsimpleapi.ZoneRecord)
@@ -186,7 +202,7 @@ func (c *dnsimpleProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, ac
 		})
 	}
 
-	return corrections, nil
+	return corrections, actualChangeCount, nil
 }
 
 func removeApexNS(records models.Records) models.Records {
@@ -261,6 +277,10 @@ func (c *dnsimpleProvider) getDNSSECCorrections(dc *models.DomainConfig) ([]*mod
 
 // DNSimple calls
 
+// Initializes a new DNSimple API client.
+//
+// - if BaseURL is present, the provided BaseURL is used. Useful to switch to DNSimple sandbox site. It defaults to production otherwise.
+// - if "DNSIMPLE_DEBUG_HTTP" is set to "1", it enables the API client logging.
 func (c *dnsimpleProvider) getClient() *dnsimpleapi.Client {
 	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: c.AccountToken})
 	tc := oauth2.NewClient(context.Background(), ts)
@@ -271,6 +291,9 @@ func (c *dnsimpleProvider) getClient() *dnsimpleapi.Client {
 
 	if c.BaseURL != "" {
 		client.BaseURL = c.BaseURL
+	}
+	if os.Getenv("DNSIMPLE_DEBUG_HTTP") == "1" {
+		client.Debug = true
 	}
 	return client
 }
@@ -539,7 +562,6 @@ func (c *dnsimpleProvider) deleteRecordFunc(recordID int64, domainName string) f
 		}
 
 		return nil
-
 	}
 }
 
@@ -639,8 +661,10 @@ func newProvider(m map[string]string, _ json.RawMessage) (*dnsimpleProvider, err
 	return api, nil
 }
 
-// remove all non-dnsimple NS records from our desired state.
-// if any are found, print a warning
+// utilities
+
+// Removes all non-dnsimple NS records from our desired state.
+// If any are found, print a warning.
 func removeOtherApexNS(dc *models.DomainConfig) {
 	newList := make([]*models.RecordConfig, 0, len(dc.Records))
 	for _, rec := range dc.Records {
@@ -660,7 +684,7 @@ func removeOtherApexNS(dc *models.DomainConfig) {
 	dc.Records = newList
 }
 
-// Return the correct combined content for all special record types, Target for everything else
+// Returns the correct combined content for all special record types, Target for everything else
 // Using RecordConfig.GetTargetCombined returns priority in the string, which we do not allow
 func getTargetRecordContent(rc *models.RecordConfig) string {
 	switch rtype := rc.Type; rtype {
@@ -677,13 +701,13 @@ func getTargetRecordContent(rc *models.RecordConfig) string {
 	case "SRV":
 		return fmt.Sprintf("%d %d %s", rc.SrvWeight, rc.SrvPort, rc.GetTargetField())
 	case "TXT":
-		return rc.GetTargetTXTJoined()
+		return rc.GetTargetCombinedFunc(txtutil.EncodeQuoted)
 	default:
 		return rc.GetTargetField()
 	}
 }
 
-// Return the correct priority for the record type, 0 for records without priority
+// Returns the correct priority for the record type, 0 for records without priority
 func getTargetRecordPriority(rc *models.RecordConfig) int {
 	switch rtype := rc.Type; rtype {
 	case "MX":
@@ -705,7 +729,7 @@ func compileAttributeErrors(err *dnsimpleapi.ErrorResponse) error {
 		e := strings.Join(errors, "& ")
 		message += fmt.Sprintf(": %s %s", field, e)
 	}
-	return fmt.Errorf(message)
+	return errors.New(message)
 }
 
 // Return true if the string ends in one of DNSimple's name server domains
@@ -717,4 +741,12 @@ func isDnsimpleNameServerDomain(name string) bool {
 		}
 	}
 	return false
+}
+
+// Tests if the content is encoded, performing a naive check on the presence of quotes
+// at the beginning and end of the string.
+//
+// This is a backward-compatible function to facilitate the TXT transition.
+func isQuotedTXT(content string) bool {
+	return content[0:1] == `"` && content[len(content)-1:] == `"`
 }

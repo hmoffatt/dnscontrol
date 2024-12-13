@@ -43,10 +43,10 @@ Simplicity.
 
 {% code title="dnsconfig.js" %}
 ```javascript
-D("example1.com", REG_NAMECOM,
+D("example.com", REG_NAMECOM,
   DnsProvider(DNS_NAMECOM),
-  A("@", "10.2.3.4")
-);
+  A("@", "10.2.3.4"),
+END);
 ```
 {% endcode %}
 
@@ -62,10 +62,10 @@ you want to use a high-performance DNS server.
 
 {% code title="dnsconfig.js" %}
 ```javascript
-D("example1.com", REG_NAMECOM,
+D("example.com", REG_NAMECOM,
   DnsProvider(DNS_AWS),
-  A("@", "10.2.3.4")
-);
+  A("@", "10.2.3.4"),
+END);
 ```
 {% endcode %}
 
@@ -83,10 +83,10 @@ updating the zone's records (most likely at a different provider).
 
 {% code title="dnsconfig.js" %}
 ```javascript
-D("example1.com", REG_THIRDPARTY,
+D("example.com", REG_THIRDPARTY,
   DnsProvider(DNS_NAMECOM),
-  A("@", "10.2.3.4")
-);
+  A("@", "10.2.3.4"),
+END);
 ```
 {% endcode %}
 
@@ -103,12 +103,12 @@ controlling.
 
 {% code title="dnsconfig.js" %}
 ```javascript
-D("example1.com", REG_NAMECOM,
+D("example.com", REG_NAMECOM,
   NAMESERVER("dns1.p03.nsone.net."),
   NAMESERVER("dns2.p03.nsone.net."),
   NAMESERVER("dns3.p03.nsone.net."),
   NAMESERVER("dns4.p03.nsone.net."),
-);
+END);
 ```
 {% endcode %}
 
@@ -126,12 +126,12 @@ is new; this is a good temporary work-around until the API starts working.
 
 {% code title="dnsconfig.js" %}
 ```javascript
-D("example1.com", REG_NAMECOM,
+D("example.com", REG_NAMECOM,
   DnsProvider(DNS_CLOUDFLARE, 0),  // Set the DNS provider but ignore the nameservers it suggests (0 == take none of the names it reports)
   NAMESERVER("kim.ns.cloudflare.com."),
   NAMESERVER("walt.ns.cloudflare.com."),
-  A("@", "10.2.3.4")
-);
+  A("@", "10.2.3.4"),
+END);
 ```
 {% endcode %}
 
@@ -146,11 +146,11 @@ Usually only to correct a bug or misconfiguration elsewhere.
 
 {% code title="dnsconfig.js" %}
 ```javascript
-D("example1.com", REG_NAMECOM,
+D("example.com", REG_NAMECOM,
   DnsProvider(DNS_NAMECOM),
-  NAMESERVER("ns1.myexample.tld"),
-  A("@", "10.2.3.4")
-);
+  NAMESERVER("ns1.myexample.com"),
+  A("@", "10.2.3.4"),
+END);
 ```
 {% endcode %}
 
@@ -169,12 +169,12 @@ There are many reasons to do this:
 
 {% code title="dnsconfig.js" %}
 ```javascript
-D("example1.com", REG_NAMECOM,
+D("example.com", REG_NAMECOM,
   DnsProvider(DNS_NAMECOM), // Our real DNS server
   DnsProvider(DNS_CLOUDFLARE, 0), // Quietly send a copy of the zone here.
   DnsProvider(DNS_BIND, 0), // And here too!
-  A("@", "10.2.3.4")
-);
+  A("@", "10.2.3.4"),
+END);
 ```
 {% endcode %}
 
@@ -200,11 +200,11 @@ More info: https://www.dns-oarc.net/files/workshop-201203/OARC-workshop-London-2
 
 {% code title="dnsconfig.js" %}
 ```javascript
-D("example1.com", REG_NAMECOM,
+D("example.com", REG_NAMECOM,
   DnsProvider(DNS_AWS, 2),  // Take 2 nameservers from AWS
   DnsProvider(DNS_GOOGLE, 2),  // Take 2 nameservers from GCP
-  A("@", "10.2.3.4")
-);
+  A("@", "10.2.3.4"),
+END);
 ```
 {% endcode %}
 
@@ -229,11 +229,11 @@ this is the output of DNSControl, not the input.
 
 {% code title="dnsconfig.js" %}
 ```javascript
-D("example1.com", REG_NAMECOM,
+D("example.com", REG_NAMECOM,
   DnsProvider(DNS_NAMECOM),
   DnsProvider(DNS_BIND, 0), // Don't activate any nameservers related to BIND.
-  A("@", "10.2.3.4")
-);
+  A("@", "10.2.3.4"),
+END);
 ```
 {% endcode %}
 
@@ -248,16 +248,16 @@ a notified if the delegation diverges.
 Why?
 Sometimes you just want to know if something changes!
 
-See the [DNS-over-HTTPS Provider](providers/dnsoverhttps.md) documentation for more info.
+See the [DNS-over-HTTPS Provider](provider/dnsoverhttps.md) documentation for more info.
 
 {% code title="dnsconfig.js" %}
 ```javascript
 var REG_MONITOR = NewRegistrar("DNS-over-HTTPS");
 
-D("example1.com", REG_MONITOR,
-  NAMESERVER("ns1.example1.com."),
-  NAMESERVER("ns2.example1.com."),
-);
+D("example.com", REG_MONITOR,
+  NAMESERVER("ns1.example.com."),
+  NAMESERVER("ns2.example.com."),
+END);
 ```
 {% endcode %}
 
@@ -278,7 +278,7 @@ Easily delegate a domain to a specific list of nameservers.
 
 {% code title="dnsconfig.js" %}
 ```javascript
-DOMAIN_ELSEWHERE("example1.com", REG_NAMECOM, [
+DOMAIN_ELSEWHERE("example.com", REG_NAMECOM, [
     "dns1.example.net.",
     "dns2.example.net.",
     "dns3.example.net.",
@@ -296,7 +296,7 @@ of nameservers is queried from the API of a single DNS provider.
 
 {% code title="dnsconfig.js" %}
 ```javascript
-DOMAIN_ELSEWHERE_AUTO("example1.com", REG_NAMECOM, DNS_AWS);
+DOMAIN_ELSEWHERE_AUTO("example.com", REG_NAMECOM, DNS_AWS);
 DOMAIN_ELSEWHERE_AUTO("example2.com", REG_NAMECOM, DNS_GOOGLE);
 ```
 {% endcode %}

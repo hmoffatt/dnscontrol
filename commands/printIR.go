@@ -10,6 +10,8 @@ import (
 	"github.com/StackExchange/dnscontrol/v4/models"
 	"github.com/StackExchange/dnscontrol/v4/pkg/js"
 	"github.com/StackExchange/dnscontrol/v4/pkg/normalize"
+	"github.com/StackExchange/dnscontrol/v4/pkg/rfc4183"
+	"github.com/StackExchange/dnscontrol/v4/pkg/rtypes"
 	"github.com/urfave/cli/v2"
 )
 
@@ -58,6 +60,7 @@ var _ = cmd(catDebug, func() *cli.Command {
 			log.SetOutput(os.Stdout)
 
 			err := exit(PrintIR(pargs))
+			rfc4183.PrintWarning()
 			if err == nil {
 				fmt.Fprintf(os.Stdout, "No errors.\n")
 			}
@@ -122,10 +125,16 @@ func ExecuteDSL(args ExecuteDSLArgs) (*models.DNSConfig, error) {
 		return nil, fmt.Errorf("no config specified")
 	}
 
-	dnsConfig, err := js.ExecuteJavascript(args.JSFile, args.DevMode, stringSliceToMap(args.Variable))
+	dnsConfig, err := js.ExecuteJavaScript(args.JSFile, args.DevMode, stringSliceToMap(args.Variable))
 	if err != nil {
 		return nil, fmt.Errorf("executing %s: %w", args.JSFile, err)
 	}
+
+	err = rtypes.PostProcess(dnsConfig.Domains)
+	if err != nil {
+		return nil, err
+	}
+
 	return dnsConfig, nil
 }
 

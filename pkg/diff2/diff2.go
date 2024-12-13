@@ -6,11 +6,11 @@ package diff2
 // against the desired records.
 
 import (
-	"bytes"
 	"fmt"
 	"strings"
 
 	"github.com/StackExchange/dnscontrol/v4/models"
+	"github.com/StackExchange/dnscontrol/v4/pkg/dnsgraph"
 )
 
 // Verb indicates the Change's type (create, delete, etc.)
@@ -50,6 +50,34 @@ type Change struct {
 	// that `Get-DnsServerResourceRecord -Name FOO -RRType A` will
 	// return exactly one record.
 	HintRecordSetLen1 bool
+}
+
+// GetType returns the type of a change.
+func (c Change) GetType() dnsgraph.NodeType {
+	if c.Type == REPORT {
+		return dnsgraph.Report
+	}
+
+	return dnsgraph.Change
+}
+
+// GetName returns the FQDN of the host being changed.
+func (c Change) GetName() string {
+	return c.Key.NameFQDN
+}
+
+// GetDependencies returns the depenencies of a change.
+func (c Change) GetDependencies() []dnsgraph.Dependency {
+	var dependencies []dnsgraph.Dependency
+
+	if c.Type == CHANGE || c.Type == DELETE {
+		dependencies = append(dependencies, dnsgraph.CreateDependencies(c.Old.GetAllDependencies(), dnsgraph.BackwardDependency)...)
+	}
+	if c.Type == CHANGE || c.Type == CREATE {
+		dependencies = append(dependencies, dnsgraph.CreateDependencies(c.New.GetAllDependencies(), dnsgraph.ForwardDependency)...)
+	}
+
+	return dependencies
 }
 
 /*
@@ -123,7 +151,7 @@ func (c *Change) CreateCorrectionWithMessage(msg string, correctionFunction func
 // www.example.com, A, and a list of all the desired IP addresses.
 //
 // Examples include: AZURE_DNS, GCORE, NS1, ROUTE53
-func ByRecordSet(existing models.Records, dc *models.DomainConfig, compFunc ComparableFunc) (ChangeList, error) {
+func ByRecordSet(existing models.Records, dc *models.DomainConfig, compFunc ComparableFunc) (ChangeList, int, error) {
 	return byHelper(analyzeByRecordSet, existing, dc, compFunc)
 }
 
@@ -135,7 +163,7 @@ func ByRecordSet(existing models.Records, dc *models.DomainConfig, compFunc Comp
 // to be served at a particular label, or the label itself is deleted.
 //
 // Examples include: GANDI_V5
-func ByLabel(existing models.Records, dc *models.DomainConfig, compFunc ComparableFunc) (ChangeList, error) {
+func ByLabel(existing models.Records, dc *models.DomainConfig, compFunc ComparableFunc) (ChangeList, int, error) {
 	return byHelper(analyzeByLabel, existing, dc, compFunc)
 }
 
@@ -151,7 +179,7 @@ func ByLabel(existing models.Records, dc *models.DomainConfig, compFunc Comparab
 // A delete always has exactly 1 old: .Old[0]
 //
 // Examples include: CLOUDFLAREAPI, HEDNS, INWX, MSDNS, OVH, PORKBUN, VULTR
-func ByRecord(existing models.Records, dc *models.DomainConfig, compFunc ComparableFunc) (ChangeList, error) {
+func ByRecord(existing models.Records, dc *models.DomainConfig, compFunc ComparableFunc) (ChangeList, int, error) {
 	return byHelper(analyzeByRecord, existing, dc, compFunc)
 }
 
@@ -177,29 +205,16 @@ func ByRecord(existing models.Records, dc *models.DomainConfig, compFunc Compara
 //	}
 //
 // Example providers include: BIND, AUTODNS
-func ByZone(existing models.Records, dc *models.DomainConfig, compFunc ComparableFunc) ([]string, bool, error) {
-
-	if len(existing) == 0 {
-		// Nothing previously existed. No need to output a list of individual changes.
-		return nil, true, nil
-	}
-
+func ByZone(existing models.Records, dc *models.DomainConfig, compFunc ComparableFunc) ([]string, bool, int, error) {
 	// Only return the messages.  The caller has the list of records needed to build the new zone.
-	instructions, err := byHelper(analyzeByRecord, existing, dc, compFunc)
-	changes := false
-	for i := range instructions {
-		//fmt.Printf("DEBUG: ByZone #%d: %v\n", i, ii)
-		if instructions[i].Type != REPORT {
-			changes = true
-		}
-	}
-	return justMsgs(instructions), changes, err
+	instructions, actualChangeCount, err := byHelper(analyzeByRecord, existing, dc, compFunc)
+	return justMsgs(instructions), actualChangeCount > 0, actualChangeCount, err
 }
 
 //
 
 // byHelper does 90% of the work for the By*() calls.
-func byHelper(fn func(cc *CompareConfig) ChangeList, existing models.Records, dc *models.DomainConfig, compFunc ComparableFunc) (ChangeList, error) {
+func byHelper(fn func(cc *CompareConfig) (ChangeList, int), existing models.Records, dc *models.DomainConfig, compFunc ComparableFunc) (ChangeList, int, error) {
 
 	// Process NO_PURGE/ENSURE_ABSENT and IGNORE*().
 	desired, msgs, err := handsoff(
@@ -210,14 +225,14 @@ func byHelper(fn func(cc *CompareConfig) ChangeList, existing models.Records, dc
 		dc.KeepUnknown,
 	)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	// Regroup existing/desiredd for easy comparison:
 	cc := NewCompareConfig(dc.Name, existing, desired, compFunc)
 
 	// Analyze and generate the instructions:
-	instructions := fn(cc)
+	instructions, actualChangeCount := fn(cc)
 
 	// If we have msgs, create a change to output them:
 	if len(msgs) != 0 {
@@ -230,39 +245,5 @@ func byHelper(fn func(cc *CompareConfig) ChangeList, existing models.Records, dc
 		instructions = append([]Change{chg}, instructions...)
 	}
 
-	return instructions, nil
-}
-
-// Stringify the datastructures (for debugging)
-
-func (c Change) String() string {
-	var buf bytes.Buffer
-	b := &buf
-
-	fmt.Fprintf(b, "Change: verb=%v\n", c.Type)
-	fmt.Fprintf(b, "    key=%v\n", c.Key)
-	if c.HintOnlyTTL {
-		fmt.Fprint(b, "    Hints=OnlyTTL\n", c.Key)
-	}
-	if len(c.Old) != 0 {
-		fmt.Fprintf(b, "    old=%v\n", c.Old)
-	}
-	if len(c.New) != 0 {
-		fmt.Fprintf(b, "    new=%v\n", c.New)
-	}
-	fmt.Fprintf(b, "    msg=%q\n", c.Msgs)
-
-	return b.String()
-}
-
-func (cl ChangeList) String() string {
-	var buf bytes.Buffer
-	b := &buf
-
-	fmt.Fprintf(b, "ChangeList: len=%d\n", len(cl))
-	for i, j := range cl {
-		fmt.Fprintf(b, "%02d: %s", i, j)
-	}
-
-	return b.String()
+	return instructions, actualChangeCount, nil
 }

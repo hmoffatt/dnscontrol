@@ -38,7 +38,7 @@ func markdownTable(matrix *FeatureMatrix) (string, error) {
 		featureMap := matrix.Providers[providerName]
 
 		var tableDataRow []string
-		tableDataRow = append(tableDataRow, "[`"+providerName+"`](providers/"+strings.ToLower(providerName)+".md)")
+		tableDataRow = append(tableDataRow, "[`"+providerName+"`](provider/"+strings.ToLower(providerName)+".md)")
 		for _, featureName := range matrix.Features {
 			tableDataRow = append(tableDataRow, featureEmoji(featureMap, featureName))
 		}
@@ -76,20 +76,25 @@ func matrixData() *FeatureMatrix {
 		OfficialSupport      = "Official Support" // vs. community supported
 		ProviderDNSProvider  = "DNS Provider"
 		ProviderRegistrar    = "Registrar"
-		DomainModifierAlias  = "[`ALIAS`](functions/domain/ALIAS.md)"
-		DomainModifierCaa    = "[`CAA`](functions/domain/CAA.md)"
-		DomainModifierDnssec = "[`AUTODNSSEC`](functions/domain/AUTODNSSEC_ON.md)"
-		DomainModifierLoc    = "[`LOC`](functions/domain/LOC.md)"
-		DomainModifierNaptr  = "[`NAPTR`](functions/domain/NAPTR.md)"
-		DomainModifierPtr    = "[`PTR`](functions/domain/PTR.md)"
-		DomainModifierSoa    = "[`SOA`](functions/domain/SOA.md)"
-		DomainModifierSrv    = "[`SRV`](functions/domain/SRV.md)"
-		DomainModifierSshfp  = "[`SSHFP`](functions/domain/SSHFP.md)"
-		DomainModifierTlsa   = "[`TLSA`](functions/domain/TLSA.md)"
-		DomainModifierDs     = "[`DS`](functions/domain/DS.md)"
+		ProviderThreadSafe   = "Concurrency Verified"
+		DomainModifierAlias  = "[`ALIAS`](language-reference/domain-modifiers/ALIAS.md)"
+		DomainModifierCaa    = "[`CAA`](language-reference/domain-modifiers/CAA.md)"
+		DomainModifierDnssec = "[`AUTODNSSEC`](language-reference/domain-modifiers/AUTODNSSEC_ON.md)"
+		DomainModifierHTTPS  = "[`HTTPS`](language-reference/domain-modifiers/HTTPS.md)"
+		DomainModifierLoc    = "[`LOC`](language-reference/domain-modifiers/LOC.md)"
+		DomainModifierNaptr  = "[`NAPTR`](language-reference/domain-modifiers/NAPTR.md)"
+		DomainModifierPtr    = "[`PTR`](language-reference/domain-modifiers/PTR.md)"
+		DomainModifierSoa    = "[`SOA`](language-reference/domain-modifiers/SOA.md)"
+		DomainModifierSrv    = "[`SRV`](language-reference/domain-modifiers/SRV.md)"
+		DomainModifierSshfp  = "[`SSHFP`](language-reference/domain-modifiers/SSHFP.md)"
+		DomainModifierSvcb   = "[`SVCB`](language-reference/domain-modifiers/SVCB.md)"
+		DomainModifierTlsa   = "[`TLSA`](language-reference/domain-modifiers/TLSA.md)"
+		DomainModifierDs     = "[`DS`](language-reference/domain-modifiers/DS.md)"
+		DomainModifierDhcid  = "[`DHCID`](language-reference/domain-modifiers/DHCID.md)"
+		DomainModifierDname  = "[`DNAME`](language-reference/domain-modifiers/DNAME.md)"
+		DomainModifierDnskey = "[`DNSKEY`](language-reference/domain-modifiers/DNSKEY.md)"
 		DualHost             = "dual host"
 		CreateDomains        = "create-domains"
-		NoPurge              = "[`NO_PURGE`](functions/domain/NO_PURGE.md)"
 		GetZones             = "get-zones"
 	)
 
@@ -99,20 +104,26 @@ func matrixData() *FeatureMatrix {
 			OfficialSupport,
 			ProviderDNSProvider,
 			ProviderRegistrar,
+			ProviderThreadSafe,
 			DomainModifierAlias,
 			DomainModifierCaa,
 			DomainModifierDnssec,
+			DomainModifierHTTPS,
 			DomainModifierLoc,
 			DomainModifierNaptr,
 			DomainModifierPtr,
 			DomainModifierSoa,
 			DomainModifierSrv,
 			DomainModifierSshfp,
+			DomainModifierSvcb,
 			DomainModifierTlsa,
 			DomainModifierDs,
+			DomainModifierDhcid,
+			DomainModifierDname,
+			DomainModifierDnskey,
 			DualHost,
 			CreateDomains,
-			NoPurge,
+			//NoPurge,
 			GetZones,
 		},
 	}
@@ -169,6 +180,10 @@ func matrixData() *FeatureMatrix {
 			func() bool { return providers.RegistrarTypes[providerName] != nil },
 		)
 		setCapability(
+			ProviderThreadSafe,
+			providers.CanConcur,
+		)
+		setCapability(
 			DomainModifierAlias,
 			providers.CanUseAlias,
 		)
@@ -181,8 +196,24 @@ func matrixData() *FeatureMatrix {
 			providers.CanUseCAA,
 		)
 		setCapability(
+			DomainModifierDhcid,
+			providers.CanUseDHCID,
+		)
+		setCapability(
+			DomainModifierDname,
+			providers.CanUseDNAME,
+		)
+		setCapability(
 			DomainModifierDs,
 			providers.CanUseDS,
+		)
+		setCapability(
+			DomainModifierDnskey,
+			providers.CanUseDNSKEY,
+		)
+		setCapability(
+			DomainModifierHTTPS,
+			providers.CanUseHTTPS,
 		)
 		setCapability(
 			DomainModifierLoc,
@@ -209,6 +240,10 @@ func matrixData() *FeatureMatrix {
 			providers.CanUseSSHFP,
 		)
 		setCapability(
+			DomainModifierSvcb,
+			providers.CanUseSVCB,
+		)
+		setCapability(
 			DomainModifierTlsa,
 			providers.CanUseTLSA,
 		)
@@ -227,17 +262,17 @@ func matrixData() *FeatureMatrix {
 			false,
 		)
 
-		// no purge is a freaky double negative
-		cantUseNOPURGE := providers.CantUseNOPURGE
-		if providerNotes[cantUseNOPURGE] != nil {
-			featureMap[NoPurge] = providerNotes[cantUseNOPURGE]
-		} else {
-			featureMap.SetSimple(
-				NoPurge,
-				false,
-				func() bool { return !providers.ProviderHasCapability(providerName, cantUseNOPURGE) },
-			)
-		}
+		//		// no purge is a freaky double negative
+		//		cantUseNOPURGE := providers.CantUseNOPURGE
+		//		if providerNotes[cantUseNOPURGE] != nil {
+		//			featureMap[NoPurge] = providerNotes[cantUseNOPURGE]
+		//		} else {
+		//			featureMap.SetSimple(
+		//				NoPurge,
+		//				false,
+		//				func() bool { return !providers.ProviderHasCapability(providerName, cantUseNOPURGE) },
+		//			)
+		//		}
 		matrix.Providers[providerName] = featureMap
 	}
 	return matrix

@@ -10,15 +10,17 @@ import (
 
 	"github.com/StackExchange/dnscontrol/v4/models"
 	"github.com/StackExchange/dnscontrol/v4/pkg/diff"
-	"github.com/StackExchange/dnscontrol/v4/pkg/diff2"
 	"github.com/StackExchange/dnscontrol/v4/providers"
 )
 
 var defaultNameservers = []string{"ns1.hosting.de", "ns2.hosting.de", "ns3.hosting.de"}
 
 var features = providers.DocumentationNotes{
+	// The default for unlisted capabilities is 'Cannot'.
+	// See providers/capabilities.go for the entire list of capabilities.
 	providers.CanAutoDNSSEC:          providers.Can(),
 	providers.CanGetZones:            providers.Can(),
+	providers.CanConcur:              providers.Cannot(),
 	providers.CanUseAlias:            providers.Can(),
 	providers.CanUseCAA:              providers.Can(),
 	providers.CanUseDS:               providers.Can(),
@@ -35,12 +37,15 @@ var features = providers.DocumentationNotes{
 }
 
 func init() {
-	providers.RegisterRegistrarType("HOSTINGDE", newHostingdeReg)
+	const providerName = "HOSTINGDE"
+	const providerMaintainer = "@juliusrickert"
+	providers.RegisterRegistrarType(providerName, newHostingdeReg)
 	fns := providers.DspFuncs{
 		Initializer:   newHostingdeDsp,
 		RecordAuditor: AuditRecords,
 	}
-	providers.RegisterDomainServiceProviderType("HOSTINGDE", fns, features)
+	providers.RegisterDomainServiceProviderType(providerName, fns, features)
+	providers.RegisterMaintainer(providerName, providerMaintainer)
 }
 
 type providerMeta struct {
@@ -118,7 +123,7 @@ func soaToString(s soaValues) string {
 }
 
 // GetZoneRecordsCorrections returns a list of corrections that will turn existing records into dc.Records.
-func (hp *hostingdeProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, records models.Records) ([]*models.Correction, error) {
+func (hp *hostingdeProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, records models.Records) ([]*models.Correction, int, error) {
 	var err error
 
 	// TTL must be between (inclusive) 1m and 1y (in fact, a little bit more)
@@ -135,22 +140,19 @@ func (hp *hostingdeProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, 
 
 	zone, err := hp.getZone(dc.Name)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
-	var create, del, mod diff.Changeset
-	if !diff2.EnableDiff2 {
-		_, create, del, mod, err = diff.New(dc).IncrementalDiff(records)
-	} else {
-		_, create, del, mod, err = diff.NewCompat(dc).IncrementalDiff(records)
-	}
+	toReport, create, del, mod, actualChangeCount, err := diff.NewCompat(dc).IncrementalDiff(records)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
+	// Start corrections with the reports
+	corrections := diff.GenerateMessageCorrections(toReport)
 
 	// NOPURGE
 	if dc.KeepUnknown {
-		del = []diff.Correlation{}
+		del = nil
 	}
 
 	// remove SOA record from corrections as it is handled separately
@@ -182,9 +184,10 @@ func (hp *hostingdeProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, 
 	}
 
 	defaultSoa := &hp.defaultSoa
-	if defaultSoa == nil {
-		defaultSoa = &soaValues{}
-	}
+	// Commented out because this can not happen:
+	// if defaultSoa == nil {
+	// 	defaultSoa = &soaValues{}
+	// }
 
 	newSOA := soaValues{
 		Refresh:     firstNonZero(desiredSoa.SoaRefresh, defaultSoa.Refresh, 86400),
@@ -222,7 +225,7 @@ func (hp *hostingdeProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, 
 	if existingAutoDNSSecEnabled && desiredAutoDNSSecEnabled {
 		currentDNSSecOptions, err := hp.getDNSSECOptions(zone.ZoneConfig.ID)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		if !currentDNSSecOptions.PublishKSK {
 			msg = append(msg, "Enabling publishKsk for AutoDNSSec")
@@ -243,7 +246,7 @@ func (hp *hostingdeProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, 
 	} else if existingAutoDNSSecEnabled && !desiredAutoDNSSecEnabled {
 		currentDNSSecOptions, err := hp.getDNSSECOptions(zone.ZoneConfig.ID)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		msg = append(msg, "Disable AutoDNSSEC")
 		zone.ZoneConfig.DNSSECMode = "off"
@@ -251,7 +254,7 @@ func (hp *hostingdeProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, 
 		// Remove auto dnssec keys from domain
 		DomainConfig, err := hp.getDomainConfig(dc.Name)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		for _, entry := range DomainConfig.DNSSecEntries {
 			for _, autoDNSKey := range currentDNSSecOptions.Keys {
@@ -264,34 +267,33 @@ func (hp *hostingdeProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, 
 	}
 
 	if !zoneChanged {
-		return nil, nil
+		return nil, 0, nil
 	}
 
-	corrections := []*models.Correction{
-		{
-			Msg: fmt.Sprintf("\n%s", strings.Join(msg, "\n")),
-			F: func() error {
-				for i := 0; i < 10; i++ {
-					err := hp.updateZone(&zone.ZoneConfig, DNSSecOptions, create, del, mod)
-					if err == nil {
-						return nil
-					}
-					// Code:10205 indicates the zone is currently blocked due to a running zone update.
-					if !strings.Contains(err.Error(), "Code:10205") {
-						return err
-					}
-
-					// Exponential back-off retry.
-					// Base of 1.8 seemed like a good trade-off, retrying for approximately 45 seconds.
-					time.Sleep(time.Duration(math.Pow(1.8, float64(i))) * 100 * time.Millisecond)
+	corrections = append(corrections, &models.Correction{
+		Msg: fmt.Sprintf("\n%s", strings.Join(msg, "\n")),
+		F: func() error {
+			for i := 0; i < 10; i++ {
+				err := hp.updateZone(&zone.ZoneConfig, DNSSecOptions, create, del, mod)
+				if err == nil {
+					return nil
 				}
-				return fmt.Errorf("retry exhaustion: zone blocked for 10 attempts")
-			},
+				// Code:10205 indicates the zone is currently blocked due to a running zone update.
+				if !strings.Contains(err.Error(), "Code:10205") {
+					return err
+				}
+
+				// Exponential back-off retry.
+				// Base of 1.8 seemed like a good trade-off, retrying for approximately 45 seconds.
+				time.Sleep(time.Duration(math.Pow(1.8, float64(i))) * 100 * time.Millisecond)
+			}
+			return fmt.Errorf("retry exhaustion: zone blocked for 10 attempts")
 		},
-	}
+	},
+	)
 
 	if removeDNSSecEntries != nil {
-		correction := models.Correction{
+		correction := &models.Correction{
 			Msg: "Removing AutoDNSSEC Keys from Domain",
 			F: func() error {
 				err := hp.dnsSecKeyModify(dc.Name, nil, removeDNSSecEntries)
@@ -301,10 +303,10 @@ func (hp *hostingdeProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, 
 				return nil
 			},
 		}
-		corrections = append(corrections, &correction)
+		corrections = append(corrections, correction)
 	}
 
-	return corrections, nil
+	return corrections, actualChangeCount, nil
 }
 
 func firstNonZero(items ...uint32) uint32 {

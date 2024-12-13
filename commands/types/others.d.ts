@@ -1,4 +1,5 @@
 declare function require(name: `${string}.json`): any;
+declare function require(name: `${string}.json5`): any;
 declare function require(name: string): true;
 
 /**
@@ -9,6 +10,7 @@ declare function require(name: string): true;
 declare const CAA_CRITICAL: RecordModifier;
 
 /**
+ * @deprecated
  * This disables a safety check intended to prevent:
  * 1. Two owners toggling a record between two settings.
  * 2. The other owner wiping all records at this label, which won't

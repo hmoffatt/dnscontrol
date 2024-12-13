@@ -4,10 +4,74 @@ Problem: It is difficult to get CAA and other records exactly right.
 
 Solution: Use a "builder" to construct it for you.
 
-* [CAA Builder](functions/record/CAA_BUILDER.md)
-* [DMARC Builder](functions/record/DMARC_BUILDER.md)
-* [M365_BUILDER](functions/record/M365_BUILDER.md)
-* [SPF Optimizer](functions/record/SPF_BUILDER.md)
+* [CAA_BUILDER](language-reference/domain-modifiers/CAA_BUILDER.md)
+* [DMARC_BUILDER](language-reference/domain-modifiers/DMARC_BUILDER.md)
+* [M365_BUILDER](language-reference/domain-modifiers/M365_BUILDER.md)
+* [SPF_BUILDER](language-reference/domain-modifiers/SPF_BUILDER.md)
+
+# Trailing commas
+
+**Trailing commas** (sometimes called "final commas") can be useful when adding new Domain Modifiers to your DNSControl code. If you want to add a Domain Modifier, you can add a new line without modifying the previously last line if that line already uses a trailing comma. This makes version-control diffs cleaner and editing code might be less troublesome.
+
+Because the DNSControl JavaScript DSL has no trailing commas, you can use the `END` constant within `D()`.
+
+## Version-control diffs example
+
+{% hint style="info" %}
+**NOTE**: `END` is just an alias for `{}`, which is ignored by DNSControl.
+{% endhint %}
+
+Let's take an example with domain: `example.com`. We have recorded the [A-record](language-reference/domain-modifiers/A.md) 'foo' configured.
+
+{% code title="dnsconfig.js" %}
+```javascript
+D("example.com", REG_MY_PROVIDER, DnsProvider(DSP_MY_PROVIDER),
+  A("foo", "1.2.3.4")
+);
+```
+{% endcode %}
+
+Let's say we want to add an [A record](language-reference/domain-modifiers/A.md) 'bar' to this domain.
+
+{% code title="dnsconfig.js" %}
+```javascript
+D("example.com", REG_MY_PROVIDER, DnsProvider(DSP_MY_PROVIDER),
+  A("foo", "1.2.3.4"),
+  A("bar", "4.3.2.1")
+);
+```
+{% endcode %}
+
+This will generate the version-control diff below:
+
+{% code title="dnsconfig.js" %}
+```diff
+-  A("foo", "1.2.3.4"),
++  A("foo", "1.2.3.4"),
++  A("bar", "4.3.2.1")
+);
+```
+{% endcode %}
+
+Let's apply the same A-record 'foo' to the domain using the `END` constant.
+
+{% code title="dnsconfig.js" %}
+```javascript
+D("example.com", REG_MY_PROVIDER, DnsProvider(DSP_MY_PROVIDER),
+  A("foo", "1.2.3.4"),
+END);
+```
+{% endcode %}
+
+This will generate the cleaner version-control diff below:
+
+{% code title="dnsconfig.js" %}
+```diff
+   A("foo", "1.2.3.4"),
++  A("bar", "4.3.2.1"),
+END);
+```
+{% endcode %}
 
 # Repeat records in many domains (macros)
 
@@ -63,7 +127,7 @@ records.
 
 Solution 1: Use a macro.
 
-```
+```javascript
 function PARKED_R53(name) {
     D(name, REG_NAMECOM, DnsProvider(DSP_MY_PROVIDER),
        A("@", "10.2.3.4"),
@@ -157,5 +221,5 @@ domain exists, who requested it, any associated ticket numbers, and so
 on.
 
 We also comment the individual parts of a record. Look at the [SPF
-Optimizer](functions/record/SPF_BUILDER.md) example.  Each part of
+Optimizer](language-reference/domain-modifiers/SPF_BUILDER.md) example.  Each part of
 the SPF record has a comment.

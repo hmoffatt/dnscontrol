@@ -3,22 +3,24 @@ package oracle
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
 	"github.com/StackExchange/dnscontrol/v4/models"
 	"github.com/StackExchange/dnscontrol/v4/pkg/diff"
-	"github.com/StackExchange/dnscontrol/v4/pkg/diff2"
 	"github.com/StackExchange/dnscontrol/v4/pkg/printer"
-	"github.com/StackExchange/dnscontrol/v4/pkg/txtutil"
 	"github.com/StackExchange/dnscontrol/v4/providers"
-	"github.com/oracle/oci-go-sdk/v32/common"
-	"github.com/oracle/oci-go-sdk/v32/dns"
-	"github.com/oracle/oci-go-sdk/v32/example/helpers"
+	"github.com/oracle/oci-go-sdk/v65/common"
+	"github.com/oracle/oci-go-sdk/v65/dns"
+	"github.com/oracle/oci-go-sdk/v65/example/helpers"
 )
 
 var features = providers.DocumentationNotes{
+	// The default for unlisted capabilities is 'Cannot'.
+	// See providers/capabilities.go for the entire list of capabilities.
 	providers.CanGetZones:            providers.Can(),
+	providers.CanConcur:              providers.Cannot(),
 	providers.CanUseAlias:            providers.Can(),
 	providers.CanUseCAA:              providers.Can(),
 	providers.CanUseDS:               providers.Cannot(), // should be supported, but getting 500s in tests
@@ -34,11 +36,14 @@ var features = providers.DocumentationNotes{
 }
 
 func init() {
+	const providerName = "ORACLE"
+	const providerMaintainer = "@kallsyms"
 	fns := providers.DspFuncs{
 		Initializer:   New,
 		RecordAuditor: AuditRecords,
 	}
-	providers.RegisterDomainServiceProviderType("ORACLE", fns, features)
+	providers.RegisterDomainServiceProviderType(providerName, fns, features)
+	providers.RegisterMaintainer(providerName, providerMaintainer)
 }
 
 type oracleProvider struct {
@@ -59,6 +64,12 @@ func New(settings map[string]string, _ json.RawMessage) (providers.DNSServicePro
 	if err != nil {
 		return nil, err
 	}
+
+	// Set default retry policy to handle 429 automatically
+	defaultRetryPolicy := common.DefaultRetryPolicy()
+	client.SetCustomClientConfiguration(common.CustomClientConfiguration{
+		RetryPolicy: &defaultRetryPolicy,
+	})
 
 	return &oracleProvider{
 		client:      client,
@@ -82,6 +93,22 @@ func (o *oracleProvider) ListZones() ([]string, error) {
 	for i, zone := range listResp.Items {
 		zones[i] = *zone.Name
 	}
+
+	for listResp.OpcNextPage != nil {
+		listResp, err = o.client.ListZones(ctx, dns.ListZonesRequest{
+			CompartmentId: &o.compartment,
+			Page:          listResp.OpcNextPage,
+		})
+
+		if err != nil {
+			return nil, err
+		}
+
+		for _, zone := range listResp.Items {
+			zones = append(zones, *zone.Name)
+		}
+	}
+
 	return zones, nil
 }
 
@@ -97,7 +124,7 @@ func (o *oracleProvider) EnsureZoneExists(domain string) error {
 	if err == nil {
 		return nil
 	}
-	if err != nil && getResp.RawResponse.StatusCode != 404 {
+	if getResp.RawResponse.StatusCode != 404 {
 		return err
 	}
 
@@ -119,7 +146,7 @@ func (o *oracleProvider) EnsureZoneExists(domain string) error {
 		}
 		return true
 	}
-	_, err = o.client.GetZone(ctx, dns.GetZoneRequest{
+	getResp, err = o.client.GetZone(ctx, dns.GetZoneRequest{
 		ZoneNameOrId:    &domain,
 		CompartmentId:   &o.compartment,
 		RequestMetadata: helpers.GetRequestMetadataWithCustomizedRetryPolicy(pollUntilAvailable),
@@ -145,7 +172,18 @@ func (o *oracleProvider) GetNameservers(domain string) ([]*models.Nameserver, er
 		nss[i] = *ns.Hostname
 	}
 
-	return models.ToNameservers(nss)
+	nssNoStrip, err := models.ToNameservers(nss)
+
+	if err != nil {
+		nssStrip, err := models.ToNameserversStripTD(nss)
+		if err != nil {
+			return nil, fmt.Errorf("could not determine if trailing dots should be stripped or not")
+		}
+
+		return nssStrip, nil
+	}
+
+	return nssNoStrip, nil
 }
 
 func (o *oracleProvider) GetZoneRecords(zone string, meta map[string]string) (models.Records, error) {
@@ -203,9 +241,8 @@ func (o *oracleProvider) GetZoneRecords(zone string, meta map[string]string) (mo
 }
 
 // GetZoneRecordsCorrections returns a list of corrections that will turn existing records into dc.Records.
-func (o *oracleProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, existingRecords models.Records) ([]*models.Correction, error) {
+func (o *oracleProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, existingRecords models.Records) ([]*models.Correction, int, error) {
 	var err error
-	txtutil.SplitSingleLongTxt(dc.Records) // Autosplit long TXT records
 
 	// Ensure we don't emit changes for attempted modification of built-in apex NSs
 	for _, rec := range dc.Records {
@@ -219,22 +256,18 @@ func (o *oracleProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, exis
 			continue
 		}
 
-		if rec.TTL != 86400 {
+		if rec.GetLabel() == "@" && rec.TTL != 86400 {
 			printer.Warnf("Oracle Cloud forces TTL=86400 for NS records. Ignoring configured TTL of %d for %s\n", rec.TTL, recNS)
 			rec.TTL = 86400
 		}
 	}
 
-	var differ diff.Differ
-	if !diff2.EnableDiff2 {
-		differ = diff.New(dc)
-	} else {
-		differ = diff.NewCompat(dc)
-	}
-	_, create, dels, modify, err := differ.IncrementalDiff(existingRecords)
+	toReport, create, dels, modify, actualChangeCount, err := diff.NewCompat(dc).IncrementalDiff(existingRecords)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
+	// Start corrections with the reports
+	corrections := diff.GenerateMessageCorrections(toReport)
 
 	/*
 		Oracle's API doesn't have a way to update an existing record.
@@ -253,7 +286,6 @@ func (o *oracleProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, exis
 			createRecords = append(createRecords, rec.Desired)
 			desc += rec.String() + "\n"
 		}
-		desc = desc[:len(desc)-1]
 	}
 
 	if len(dels) > 0 {
@@ -261,7 +293,6 @@ func (o *oracleProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, exis
 			deleteRecords = append(deleteRecords, rec.Existing)
 			desc += rec.String() + "\n"
 		}
-		desc = desc[:len(desc)-1]
 	}
 
 	if len(modify) > 0 {
@@ -270,18 +301,19 @@ func (o *oracleProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, exis
 			deleteRecords = append(deleteRecords, rec.Existing)
 			desc += rec.String() + "\n"
 		}
-		desc = desc[:len(desc)-1]
 	}
 
+	// There were corrections. Send them as one big batch:
 	if len(createRecords) > 0 || len(deleteRecords) > 0 {
-		return []*models.Correction{{
+		corrections = append(corrections, &models.Correction{
 			Msg: desc,
 			F: func() error {
 				return o.patch(createRecords, deleteRecords, dc.Name)
 			},
-		}}, nil
+		})
 	}
-	return []*models.Correction{}, nil
+
+	return corrections, actualChangeCount, nil
 }
 
 func (o *oracleProvider) patch(createRecords, deleteRecords models.Records, domain string) error {
@@ -308,6 +340,7 @@ func (o *oracleProvider) patch(createRecords, deleteRecords models.Records, doma
 			batchEnd = len(ops)
 		}
 		patchReq.Items = ops[batchStart:batchEnd]
+
 		_, err := o.client.PatchZoneRecords(ctx, patchReq)
 		if err != nil {
 			return err

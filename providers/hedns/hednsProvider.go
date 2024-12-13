@@ -3,6 +3,7 @@ package hedns
 import (
 	"crypto/sha1"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/cookiejar"
@@ -16,7 +17,6 @@ import (
 
 	"github.com/PuerkitoBio/goquery"
 	"github.com/StackExchange/dnscontrol/v4/models"
-	"github.com/StackExchange/dnscontrol/v4/pkg/diff"
 	"github.com/StackExchange/dnscontrol/v4/pkg/diff2"
 	"github.com/StackExchange/dnscontrol/v4/pkg/txtutil"
 	"github.com/StackExchange/dnscontrol/v4/providers"
@@ -43,18 +43,23 @@ Additionally
 */
 
 var features = providers.DocumentationNotes{
+	// The default for unlisted capabilities is 'Cannot'.
+	// See providers/capabilities.go for the entire list of capabilities.
 	providers.CanAutoDNSSEC:          providers.Cannot(),
 	providers.CanGetZones:            providers.Can(),
+	providers.CanConcur:              providers.Cannot(),
 	providers.CanUseAlias:            providers.Can(),
 	providers.CanUseCAA:              providers.Can(),
 	providers.CanUseDS:               providers.Cannot(),
 	providers.CanUseDSForChildren:    providers.Cannot(),
+	providers.CanUseHTTPS:            providers.Can(),
 	providers.CanUseLOC:              providers.Can(),
 	providers.CanUseNAPTR:            providers.Can(),
 	providers.CanUsePTR:              providers.Can(),
 	providers.CanUseSOA:              providers.Cannot(),
 	providers.CanUseSRV:              providers.Can(),
 	providers.CanUseSSHFP:            providers.Can(),
+	providers.CanUseSVCB:             providers.Can(),
 	providers.CanUseTLSA:             providers.Cannot(),
 	providers.DocCreateDomains:       providers.Can(),
 	providers.DocDualHost:            providers.Can(),
@@ -62,11 +67,14 @@ var features = providers.DocumentationNotes{
 }
 
 func init() {
+	const providerName = "HEDNS"
+	const providerMaintainer = "@rblenkinsopp"
 	fns := providers.DspFuncs{
 		Initializer:   newHEDNSProvider,
 		RecordAuditor: AuditRecords,
 	}
-	providers.RegisterDomainServiceProviderType("HEDNS", fns, features)
+	providers.RegisterDomainServiceProviderType(providerName, fns, features)
+	providers.RegisterMaintainer(providerName, providerMaintainer)
 }
 
 var defaultNameservers = []string{
@@ -113,13 +121,13 @@ func newHEDNSProvider(cfg map[string]string, _ json.RawMessage) (providers.DNSSe
 	sessionFilePath := cfg["session-file-path"]
 
 	if username == "" {
-		return nil, fmt.Errorf("username must be provided")
+		return nil, errors.New("username must be provided")
 	}
 	if password == "" {
-		return nil, fmt.Errorf("password must be provided")
+		return nil, errors.New("password must be provided")
 	}
 	if totpSecret != "" && totpValue != "" {
-		return nil, fmt.Errorf("totp and totp-key must not be specified at the same time")
+		return nil, errors.New("totp and totp-key must not be specified at the same time")
 	}
 
 	// Perform the initial login
@@ -179,7 +187,7 @@ func (c *hednsProvider) GetNameservers(_ string) ([]*models.Nameserver, error) {
 }
 
 // GetZoneRecordsCorrections returns a list of corrections that will turn existing records into dc.Records.
-func (c *hednsProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, records models.Records) ([]*models.Correction, error) {
+func (c *hednsProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, records models.Records) ([]*models.Correction, int, error) {
 
 	// Get the SOA record to get the ZoneID, then remove it from the list.
 	zoneID := uint64(0)
@@ -192,57 +200,13 @@ func (c *hednsProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, recor
 		}
 	}
 
-	// Normalize
-	txtutil.SplitSingleLongTxt(dc.Records) // Autosplit long TXT records
-
-	// Fallback to legacy mode if diff2 is not enabled, remove when diff1 is deprecated.
-	if !diff2.EnableDiff2 {
-		return c.getDiff1DomainCorrections(dc, zoneID, prunedRecords)
-	}
 	return c.getDiff2DomainCorrections(dc, zoneID, prunedRecords)
 }
 
-func (c *hednsProvider) getDiff1DomainCorrections(dc *models.DomainConfig, zoneID uint64, records models.Records) ([]*models.Correction, error) {
-	var corrections []*models.Correction
-
-	differ := diff.New(dc)
-	_, toCreate, toDelete, toModify, err := differ.IncrementalDiff(records)
+func (c *hednsProvider) getDiff2DomainCorrections(dc *models.DomainConfig, zoneID uint64, records models.Records) ([]*models.Correction, int, error) {
+	changes, actualChangeCount, err := diff2.ByRecord(records, dc, nil)
 	if err != nil {
-		return nil, err
-	}
-
-	for _, del := range toDelete {
-		recordID := del.Existing.Original.(Record).RecordID
-		corrections = append(corrections, &models.Correction{
-			Msg: del.String(),
-			F:   func() error { return c.deleteZoneRecord(zoneID, recordID) },
-		})
-	}
-
-	for _, cre := range toCreate {
-		record := cre.Desired
-		corrections = append(corrections, &models.Correction{
-			Msg: cre.String(),
-			F:   func() error { return c.createZoneRecord(zoneID, record) },
-		})
-	}
-
-	for _, mod := range toModify {
-		record := mod.Desired
-		recordID := mod.Existing.Original.(Record).RecordID
-		corrections = append(corrections, &models.Correction{
-			Msg: mod.String(),
-			F:   func() error { return c.changeZoneRecord(zoneID, recordID, record) },
-		})
-	}
-
-	return corrections, nil
-}
-
-func (c *hednsProvider) getDiff2DomainCorrections(dc *models.DomainConfig, zoneID uint64, records models.Records) ([]*models.Correction, error) {
-	changes, err := diff2.ByRecord(records, dc, nil)
-	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	var corrections []*models.Correction
@@ -280,7 +244,7 @@ func (c *hednsProvider) getDiff2DomainCorrections(dc *models.DomainConfig, zoneI
 		}
 	}
 
-	return corrections, nil
+	return corrections, actualChangeCount, nil
 }
 
 // GetZoneRecords returns all the records for the given domain
@@ -319,7 +283,7 @@ func (c *hednsProvider) GetZoneRecords(domain string, meta map[string]string) (m
 
 	// Check we can find the zone records
 	if document.Find("#dns_main_content").Size() == 0 {
-		return nil, fmt.Errorf("zone records listing failed")
+		return nil, errors.New("zone records listing failed")
 	}
 
 	// Load all the domain records
@@ -368,7 +332,7 @@ func (c *hednsProvider) GetZoneRecords(domain string, meta map[string]string) (m
 			rc.Type = "TXT"
 			fallthrough
 		default:
-			err = rc.PopulateFromString(rc.Type, data, domain)
+			err = rc.PopulateFromStringFunc(rc.Type, data, domain, txtutil.ParseQuoted)
 		}
 
 		if err != nil {
@@ -420,7 +384,7 @@ func (c *hednsProvider) authUsernameAndPassword() (authenticated bool, requiresT
 	document, err := c.parseResponseForDocumentAndErrors(response)
 	if err != nil {
 		if err.Error() == errorInvalidCredentials {
-			err = fmt.Errorf("authentication failed with incorrect username or password")
+			err = errors.New("authentication failed with incorrect username or password")
 		}
 		if err.Error() == errorTotpTokenRequired {
 			return false, true, nil
@@ -438,7 +402,7 @@ func (c *hednsProvider) authUsernameAndPassword() (authenticated bool, requiresT
 func (c *hednsProvider) auth2FA() (authenticated bool, err error) {
 
 	if c.TfaValue == "" && c.TfaSecret == "" {
-		return false, fmt.Errorf("account requires two-factor authentication but neither totp or totp-key were provided")
+		return false, errors.New("account requires two-factor authentication but neither totp or totp-key were provided")
 	}
 
 	if c.TfaValue == "" && c.TfaSecret != "" {
@@ -462,9 +426,9 @@ func (c *hednsProvider) auth2FA() (authenticated bool, err error) {
 	if err != nil {
 		switch err.Error() {
 		case errorInvalidTotpToken:
-			err = fmt.Errorf("invalid TOTP token value")
+			err = errors.New("invalid TOTP token value")
 		case errorTotpTokenReused:
-			err = fmt.Errorf("TOTP token was reused within its period (30 seconds)")
+			err = errors.New("TOTP token was reused within its period (30 seconds)")
 		}
 		return false, err
 	}
@@ -503,7 +467,7 @@ func (c *hednsProvider) authenticate() error {
 	}
 
 	if !authenticated {
-		err = fmt.Errorf("unknown authentication failure")
+		err = errors.New("unknown authentication failure")
 	} else {
 		if c.SessionFilePath != "" {
 			err = c.saveSessionFile()
@@ -603,7 +567,7 @@ func (c *hednsProvider) editZoneRecord(zoneID uint64, recordID uint64, rc *model
 		values.Set("Weight", strconv.FormatUint(uint64(rc.SrvWeight), 10))
 		values.Set("Port", strconv.FormatUint(uint64(rc.SrvPort), 10))
 	default:
-		values.Set("Content", rc.GetTargetCombined())
+		values.Set("Content", rc.GetTargetCombinedFunc(txtutil.EncodeQuoted))
 	}
 
 	response, err := c.httpClient.PostForm(apiEndpoint, values)
@@ -692,7 +656,7 @@ func (c *hednsProvider) loadSessionFile() error {
 	for i, entry := range strings.Split(string(bytes), "\n") {
 		if i == 0 {
 			if entry != c.generateCredentialHash() {
-				return fmt.Errorf("invalid credential hash in session file")
+				return errors.New("invalid credential hash in session file")
 			}
 		} else {
 			kv := strings.Split(entry, "=")
@@ -727,7 +691,7 @@ func (c *hednsProvider) parseResponseForDocumentAndErrors(response *http.Respons
 				return true
 			}
 		}
-		err = fmt.Errorf(element.Text())
+		err = errors.New(element.Text())
 		return false
 	})
 

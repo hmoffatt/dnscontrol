@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 
 	"golang.org/x/text/cases"
@@ -16,6 +17,7 @@ func join(parts ...string) string {
 	return strings.Join(parts, string(os.PathSeparator))
 }
 
+// removes repeated blank lines, replacing them with a single blank line.
 func fixRuns(s string) string {
 	lines := strings.Split(s, "\n")
 	var out []string
@@ -31,6 +33,33 @@ func fixRuns(s string) string {
 }
 
 var delimiterRegex = regexp.MustCompile(`(?m)^---\n`)
+
+func readDocFile(fPath string) (map[string]interface{}, string, error) {
+	content, err := os.ReadFile(fPath)
+	if err != nil {
+		return nil, "", err
+	}
+	frontMatter, body, err := parseFrontMatter(string(content))
+	if err != nil {
+		return nil, "", err
+	}
+
+	lines := strings.Split(body, "\n")
+
+	body = ""
+
+	for _, line := range lines {
+		if strings.HasPrefix(line, "{%") && strings.HasSuffix(line, "%}") {
+			continue
+		}
+		body += line + "\n"
+	}
+
+	body = strings.ReplaceAll(body, "**NOTE**", "NOTE")
+	body = strings.ReplaceAll(body, "**WARNING**", "WARNING")
+	body = fixRuns(body)
+	return frontMatter, body, nil
+}
 
 func parseFrontMatter(content string) (map[string]interface{}, string, error) {
 	delimiterIndices := delimiterRegex.FindAllStringIndex(content, 2)
@@ -49,15 +78,15 @@ func parseFrontMatter(content string) (map[string]interface{}, string, error) {
 }
 
 var returnTypes = map[string]string{
-	"domain": "DomainModifier",
-	"global": "void",
-	"record": "RecordModifier",
+	"domain-modifiers":    "DomainModifier",
+	"top-level-functions": "void",
+	"record-modifiers":    "RecordModifier",
 }
 
 var categories = map[string]string{
-	"domain": "domain-modifiers",
-	"global": "top-level-functions",
-	"record": "record-modifiers",
+	"domain-modifiers":    "domain-modifiers",
+	"top-level-functions": "top-level-functions",
+	"record-modifiers":    "record-modifiers",
 }
 
 var providerNames = map[string]string{
@@ -72,7 +101,7 @@ var providerNames = map[string]string{
 func generateFunctionTypes() (string, error) {
 	funcs := []Function{}
 
-	srcRoot := join("documentation", "functions")
+	srcRoot := join("documentation", "language-reference")
 	types, err := os.ReadDir(srcRoot)
 	if err != nil {
 		return "", err
@@ -93,31 +122,15 @@ func generateFunctionTypes() (string, error) {
 				return "", errors.New("not a file: " + fPath)
 			}
 			// println("Processing", fPath)
-			content, err := os.ReadFile(fPath)
-			if err != nil {
-				return "", err
-			}
-			frontMatter, body, err := parseFrontMatter(string(content))
+			frontMatter, body, err := readDocFile(fPath)
 			if err != nil {
 				println("Error parsing front matter in", fPath, "error: ", err.Error())
 				continue
+
 			}
 			if frontMatter["ts_ignore"] == true {
 				continue
 			}
-
-			lines := strings.Split(body, "\n")
-			body = ""
-			for _, line := range lines {
-				if strings.HasPrefix(line, "{%") && strings.HasSuffix(line, "%}") {
-					continue
-				}
-				body += line + "\n"
-			}
-
-			body = strings.ReplaceAll(body, "**NOTE**", "NOTE")
-			body = strings.ReplaceAll(body, "**WARNING**", "WARNING")
-			body = fixRuns(body)
 
 			paramNames := []string{}
 			if frontMatter["parameters"] != nil {
@@ -174,6 +187,10 @@ func generateFunctionTypes() (string, error) {
 			})
 		}
 	}
+
+	sort.Slice(funcs, func(i, j int) bool {
+		return funcs[i].Name < funcs[j].Name
+	})
 
 	content := ""
 	for _, f := range funcs {

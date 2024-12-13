@@ -25,7 +25,10 @@ type providerClient struct {
 }
 
 var features = providers.DocumentationNotes{
+	// The default for unlisted capabilities is 'Cannot'.
+	// See providers/capabilities.go for the entire list of capabilities.
 	providers.CanGetZones:            providers.Can(),
+	providers.CanConcur:              providers.Can(),
 	providers.CanUseCAA:              providers.Can(),
 	providers.CanUseSRV:              providers.Can(),
 	providers.DocOfficiallySupported: providers.Can(),
@@ -58,11 +61,14 @@ func newProvider(m map[string]string) (*providerClient, error) {
 }
 
 func init() {
-	providers.RegisterRegistrarType("CSCGLOBAL", newReg)
+	const providerName = "CSCGLOBAL"
+	const providerMaintainer = "@mikenz"
+	providers.RegisterRegistrarType(providerName, newReg)
 
 	fns := providers.DspFuncs{
 		Initializer:   newDsp,
 		RecordAuditor: AuditRecords,
 	}
-	providers.RegisterDomainServiceProviderType("CSCGLOBAL", fns, features)
+	providers.RegisterDomainServiceProviderType(providerName, fns, features)
+	providers.RegisterMaintainer(providerName, providerMaintainer)
 }

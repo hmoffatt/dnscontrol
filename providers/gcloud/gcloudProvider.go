@@ -5,12 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/StackExchange/dnscontrol/v4/models"
-	"github.com/StackExchange/dnscontrol/v4/pkg/diff"
 	"github.com/StackExchange/dnscontrol/v4/pkg/diff2"
 	"github.com/StackExchange/dnscontrol/v4/pkg/printer"
 	"github.com/StackExchange/dnscontrol/v4/pkg/txtutil"
@@ -21,31 +20,47 @@ import (
 	"google.golang.org/api/option"
 )
 
+const selfLinkBasePath = "https://www.googleapis.com/compute/v1/projects/"
+
 var features = providers.DocumentationNotes{
+	// The default for unlisted capabilities is 'Cannot'.
+	// See providers/capabilities.go for the entire list of capabilities.
 	providers.CanGetZones:            providers.Can(),
+	providers.CanConcur:              providers.Can(),
 	providers.CanUseAlias:            providers.Can(),
 	providers.CanUseCAA:              providers.Can(),
 	providers.CanUseDSForChildren:    providers.Can(),
+	providers.CanUseHTTPS:            providers.Can(),
 	providers.CanUseLOC:              providers.Cannot(),
 	providers.CanUsePTR:              providers.Can(),
 	providers.CanUseSRV:              providers.Can(),
 	providers.CanUseSSHFP:            providers.Can(),
+	providers.CanUseSVCB:             providers.Can(),
 	providers.CanUseTLSA:             providers.Can(),
 	providers.DocCreateDomains:       providers.Can(),
 	providers.DocDualHost:            providers.Can(),
 	providers.DocOfficiallySupported: providers.Can(),
 }
 
+var (
+	visibilityCheck  = regexp.MustCompile("^(public|private)$")
+	networkURLCheck  = regexp.MustCompile("^" + selfLinkBasePath + "[a-z][-a-z0-9]{4,28}[a-z0-9]/global/networks/[a-z]([-a-z0-9]{0,61}[a-z0-9])?$")
+	networkNameCheck = regexp.MustCompile("^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$")
+)
+
 func sPtr(s string) *string {
 	return &s
 }
 
 func init() {
+	const providerName = "GCLOUD"
+	const providerMaintainer = "@riyadhalnur"
 	fns := providers.DspFuncs{
 		Initializer:   New,
 		RecordAuditor: AuditRecords,
 	}
-	providers.RegisterDomainServiceProviderType("GCLOUD", fns, features)
+	providers.RegisterDomainServiceProviderType(providerName, fns, features)
+	providers.RegisterMaintainer(providerName, providerMaintainer)
 }
 
 type gcloudProvider struct {
@@ -53,9 +68,9 @@ type gcloudProvider struct {
 	project       string
 	nameServerSet *string
 	zones         map[string]*gdns.ManagedZone
-	// diff1
-	oldRRsMap   map[string]map[key]*gdns.ResourceRecordSet
-	zoneNameMap map[string]string
+	// provider metadata fields
+	Visibility string   `json:"visibility"`
+	Networks   []string `json:"networks"`
 }
 
 type errNoExist struct {
@@ -73,28 +88,22 @@ func New(cfg map[string]string, metadata json.RawMessage) (providers.DNSServiceP
 	// fix it if we find that.
 
 	ctx := context.Background()
-	var hc *http.Client
+	var opt option.ClientOption
 	if key, ok := cfg["private_key"]; ok {
 		cfg["private_key"] = strings.Replace(key, "\\n", "\n", -1)
 		raw, err := json.Marshal(cfg)
 		if err != nil {
 			return nil, err
 		}
-		config, err := gauth.JWTConfigFromJSON(raw, "https://www.googleapis.com/auth/ndev.clouddns.readwrite")
+		config, err := gauth.JWTConfigFromJSON(raw, gdns.NdevClouddnsReadwriteScope)
 		if err != nil {
 			return nil, err
 		}
-		hc = config.Client(ctx)
+		opt = option.WithTokenSource(config.TokenSource(ctx))
 	} else {
-		var err error
-		hc, err = gauth.DefaultClient(ctx, "https://www.googleapis.com/auth/ndev.clouddns.readwrite")
-		if err != nil {
-			return nil, fmt.Errorf("no creds.json private_key found and ADC failed with:\n%s", err)
-		}
+		opt = option.WithScopes(gdns.NdevClouddnsReadwriteScope)
 	}
-	// FIXME(tlim): Is it a problem that ctx is included with hc and in
-	// the call to NewService?  Seems redundant.
-	dcli, err := gdns.NewService(ctx, option.WithHTTPClient(hc))
+	dcli, err := gdns.NewService(ctx, opt)
 	if err != nil {
 		return nil, err
 	}
@@ -108,20 +117,54 @@ func New(cfg map[string]string, metadata json.RawMessage) (providers.DNSServiceP
 		client:        dcli,
 		nameServerSet: nss,
 		project:       cfg["project_id"],
-		oldRRsMap:     map[string]map[key]*gdns.ResourceRecordSet{},
-		zoneNameMap:   map[string]string{},
+	}
+	if len(metadata) != 0 {
+		err := json.Unmarshal(metadata, g)
+		if err != nil {
+			return nil, err
+		}
+		if len(g.Visibility) != 0 {
+			if ok := visibilityCheck.MatchString(g.Visibility); !ok {
+				return nil, fmt.Errorf("GCLOUD :visibility set but not one of \"public\" or \"private\"")
+			}
+			printer.Printf("GCLOUD :visibility %s configured\n", g.Visibility)
+		}
+		for i, v := range g.Networks {
+			if ok := networkURLCheck.MatchString(v); ok {
+				// the user specified a fully qualified network url
+				continue
+			}
+			if ok := networkNameCheck.MatchString(v); !ok {
+				return nil, fmt.Errorf("GCLOUD :networks set but %s does not appear to be a valid network name or url", v)
+			}
+			// assume target vpc network exists in the same project as the dns zones
+			g.Networks[i] = fmt.Sprintf("%s%s/global/networks/%s", selfLinkBasePath, g.project, v)
+		}
 	}
 	return g, g.loadZoneInfo()
 }
 
 func (g *gcloudProvider) loadZoneInfo() error {
+	// TODO(asn-iac): In order to fully support split horizon domains within the same GCP project,
+	// need to parse the zone Visibility field from *ManagedZone, but currently
+	// gcloudProvider.zones is map[string]*gdns.ManagedZone
+	// where the map keys are the zone dns names. A given GCP project can have
+	// multiple zones of the same dns name.
 	if g.zones != nil {
 		return nil
 	}
 	g.zones = map[string]*gdns.ManagedZone{}
 	pageToken := ""
 	for {
+	retry:
 		resp, err := g.client.ManagedZones.List(g.project).PageToken(pageToken).Do()
+		var check *googleapi.ServerResponse
+		if resp != nil {
+			check = &resp.ServerResponse
+		}
+		if retryNeeded(check, err) {
+			goto retry
+		}
 		if err != nil {
 			return err
 		}
@@ -167,9 +210,6 @@ type key struct {
 func keyFor(r *gdns.ResourceRecordSet) key {
 	return key{Type: r.Type, Name: r.Name}
 }
-func keyForRec(r *models.RecordConfig) key {
-	return key{Type: r.Type, Name: r.GetLabelFQDN() + "."}
-}
 
 // GetZoneRecords gets the records of a zone and returns them in RecordConfig format.
 func (g *gcloudProvider) GetZoneRecords(domain string, meta map[string]string) (models.Records, error) {
@@ -178,7 +218,7 @@ func (g *gcloudProvider) GetZoneRecords(domain string, meta map[string]string) (
 }
 
 func (g *gcloudProvider) getZoneSets(domain string) (models.Records, error) {
-	rrs, zoneName, err := g.getRecords(domain)
+	rrs, err := g.getRecords(domain)
 	if err != nil {
 		return nil, err
 	}
@@ -197,119 +237,187 @@ func (g *gcloudProvider) getZoneSets(domain string) (models.Records, error) {
 		}
 	}
 
-	g.oldRRsMap[domain] = oldRRs
-	g.zoneNameMap[domain] = zoneName
-
 	return existingRecords, err
 }
 
 // GetZoneRecordsCorrections returns a list of corrections that will turn existing records into dc.Records.
-func (g *gcloudProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, existingRecords models.Records) ([]*models.Correction, error) {
+func (g *gcloudProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, existingRecords models.Records) ([]*models.Correction, int, error) {
 
-	txtutil.SplitSingleLongTxt(dc.Records) // Autosplit long TXT records
-
-	oldRRs, ok := g.oldRRsMap[dc.Name]
-	if !ok {
-		return nil, fmt.Errorf("oldRRsMap: no zone named %q", dc.Name)
-	}
-	zoneName, ok := g.zoneNameMap[dc.Name]
-	if !ok {
-		return nil, fmt.Errorf("zoneNameMap: no zone named %q", dc.Name)
-	}
-
-	// first collect keys that have changed
-	var differ diff.Differ
-	if !diff2.EnableDiff2 {
-		differ = diff.New(dc)
-	} else {
-		differ = diff.NewCompat(dc)
-	}
-	_, create, delete, modify, err := differ.IncrementalDiff(existingRecords)
+	changes, actualChangeCount, err := diff2.ByRecordSet(existingRecords, dc, nil)
 	if err != nil {
-		return nil, fmt.Errorf("incdiff error: %w", err)
+		return nil, 0, err
+	}
+	if len(changes) == 0 {
+		return nil, 0, nil
 	}
 
-	changedKeys := map[key]bool{}
-	var msgs []string
-	for _, c := range create {
-		msgs = append(msgs, fmt.Sprint(c))
-		changedKeys[keyForRec(c.Desired)] = true
-	}
-	for _, d := range delete {
-		msgs = append(msgs, fmt.Sprint(d))
-		changedKeys[keyForRec(d.Existing)] = true
-	}
-	for _, m := range modify {
-		msgs = append(msgs, fmt.Sprint(m))
-		changedKeys[keyForRec(m.Existing)] = true
-	}
-	if len(changedKeys) == 0 {
-		return nil, nil
-	}
-	chg := &gdns.Change{Kind: "dns#change"}
-	for ck := range changedKeys {
-		// remove old version (if present)
-		if old, ok := oldRRs[ck]; ok {
-			chg.Deletions = append(chg.Deletions, old)
+	var corrections []*models.Correction
+	batch := &gdns.Change{Kind: "dns#change"}
+	var accumlatedMsgs []string
+	var newMsgs []string
+	var newAdds, newDels *gdns.ResourceRecordSet
+
+	for _, change := range changes {
+
+		// Determine the work to be done.
+		n := change.Key.NameFQDN + "."
+		ty := change.Key.Type
+		switch change.Type {
+		case diff2.REPORT:
+			newMsgs = change.Msgs
+			newAdds = nil
+			newDels = nil
+		case diff2.CREATE:
+			newMsgs = change.Msgs
+			newAdds = mkRRSs(n, ty, change.New)
+			newDels = nil
+		case diff2.CHANGE:
+			newMsgs = change.Msgs
+			newAdds = mkRRSs(n, ty, change.New)
+			newDels = change.Old[0].Original.(*gdns.ResourceRecordSet)
+		case diff2.DELETE:
+			newMsgs = change.Msgs
+			newAdds = nil
+			newDels = change.Old[0].Original.(*gdns.ResourceRecordSet)
+		default:
+			return nil, 0, fmt.Errorf("GCLOUD unhandled change.TYPE %s", change.Type)
 		}
-		// collect records to replace with
-		newRRs := &gdns.ResourceRecordSet{
-			Name: ck.Name,
-			Type: ck.Type,
-			Kind: "dns#resourceRecordSet",
+
+		// If the work would overflow the current batch, process what we have so far and start a new batch.
+		if wouldOverfill(batch, newAdds, newDels) {
+			// Process what we have.
+			corrections = g.mkCorrection(corrections, accumlatedMsgs, batch, dc.Name)
+
+			// Start a new batch.
+			batch = &gdns.Change{Kind: "dns#change"}
+			accumlatedMsgs = nil
 		}
-		for _, r := range dc.Records {
-			if keyForRec(r) == ck {
-				newRRs.Rrdatas = append(newRRs.Rrdatas, r.GetTargetCombined())
-				newRRs.Ttl = int64(r.TTL)
-			}
+
+		// Add the new work to the batch.
+		if newAdds != nil {
+			batch.Additions = append(batch.Additions, newAdds)
 		}
-		if len(newRRs.Rrdatas) > 0 {
-			chg.Additions = append(chg.Additions, newRRs)
+		if newDels != nil {
+			batch.Deletions = append(batch.Deletions, newDels)
 		}
+		if len(newMsgs) != 0 {
+			accumlatedMsgs = append(accumlatedMsgs, newMsgs...)
+		}
+
 	}
 
-	// FIXME(tlim): Google will return an error if too many changes are
-	// specified in a single request. We should split up very large
-	// batches.  This can be reliably reproduced with the 1201
-	// integration test.  The error you get is:
-	// googleapi: Error 403: The change would exceed quota for additions per change., quotaExceeded
-	//log.Printf("PAUSE STT = %+v %v\n", err, resp)
-	//log.Printf("PAUSE ERR = %+v %v\n", err, resp)
+	// Process the remaining work.
+	corrections = g.mkCorrection(corrections, accumlatedMsgs, batch, dc.Name)
+	return corrections, actualChangeCount, nil
+}
 
-	runChange := func() error {
-	retry:
-		resp, err := g.client.Changes.Create(g.project, zoneName, chg).Do()
-		if retryNeeded(resp, err) {
-			goto retry
-		}
-		if err != nil {
-			return fmt.Errorf("runChange error: %w", err)
-		}
+// mkRRSs returns a gdns.ResourceRecordSet using the name, rType, and recs
+func mkRRSs(name, rType string, recs models.Records) *gdns.ResourceRecordSet {
+	if len(recs) == 0 { // NB(tlim): This is defensive. mkRRSs is never called with an empty list.
 		return nil
 	}
 
-	return []*models.Correction{{
-		Msg: strings.Join(msgs, "\n"),
-		F:   runChange,
-	}}, nil
+	newRRS := &gdns.ResourceRecordSet{
+		Name: name,
+		Type: rType,
+		Kind: "dns#resourceRecordSet",
+		Ttl:  int64(recs[0].TTL), // diff2 assures all TTLs in a ReceordSet are the same.
+	}
 
+	for _, r := range recs {
+		newRRS.Rrdatas = append(newRRS.Rrdatas, r.GetTargetCombinedFunc(txtutil.EncodeQuoted))
+	}
+
+	return newRRS
+}
+
+// wouldOverfill returns true if adding this work would overflow the batch.
+func wouldOverfill(batch *gdns.Change, adds, dels *gdns.ResourceRecordSet) bool {
+	const batchMax = 1000
+	// Google used to document batchMax = 1000.  As of 2024-01 the max isn't
+	// documented but testing shows it rejects if either Additions or Deletions
+	// are >3000.  Setting this to 3001 makes the batchRecordswithOthers
+	// integration test fail.
+	// It is currently set to 1000 because (1) its the last documented max,
+	// (2) changes of more than 1000 RSets is rare; we'd rather be correct and
+	// working than broken and efficient.
+
+	addCount := 0
+	if adds != nil {
+		addCount = len(adds.Rrdatas)
+	}
+	delCount := 0
+	if dels != nil {
+		delCount = len(dels.Rrdatas)
+	}
+
+	if (len(batch.Additions) + addCount) > batchMax { // Would additions push us over the limit?
+		return true
+	}
+	if (len(batch.Deletions) + delCount) > batchMax { // Would deletions push us over the limit?
+		return true
+	}
+	return false
+}
+
+func (g *gcloudProvider) mkCorrection(corrections []*models.Correction, accumulatedMsgs []string, batch *gdns.Change, origin string) []*models.Correction {
+	if len(accumulatedMsgs) == 0 && len(batch.Additions) == 0 && len(batch.Deletions) == 0 {
+		// Nothing to do!
+		return corrections
+	}
+
+	corr := &models.Correction{}
+	if len(accumulatedMsgs) != 0 {
+		corr.Msg = strings.Join(accumulatedMsgs, "\n")
+	}
+	if (len(batch.Additions) + len(batch.Deletions)) != 0 {
+		corr.F = func() error { return g.process(origin, batch) }
+	}
+
+	corrections = append(corrections, corr)
+	return corrections
+}
+
+// process calls the Google DNS API to process a Change and re-tries if needed.
+func (g *gcloudProvider) process(origin string, batch *gdns.Change) error {
+
+	zoneName, err := g.getZone(origin)
+	if err != nil || zoneName == nil {
+		return fmt.Errorf("zoneNameMap: no zone named %q", origin)
+	}
+
+retry:
+	resp, err := g.client.Changes.Create(g.project, zoneName.Name, batch).Do()
+	var check *googleapi.ServerResponse
+	if resp != nil {
+		check = &resp.ServerResponse
+	}
+	if retryNeeded(check, err) {
+		goto retry
+	}
+	if err != nil {
+		return fmt.Errorf("runChange error: %w", err)
+	}
+	return nil
 }
 
 func nativeToRecord(set *gdns.ResourceRecordSet, rec, origin string) (*models.RecordConfig, error) {
 	r := &models.RecordConfig{}
 	r.SetLabelFromFQDN(set.Name, origin)
 	r.TTL = uint32(set.Ttl)
-	if err := r.PopulateFromString(set.Type, rec, origin); err != nil {
-		return nil, fmt.Errorf("unparsable record received from GCLOUD: %w", err)
+	rtype := set.Type
+	r.Original = set
+	err := r.PopulateFromStringFunc(rtype, rec, origin, txtutil.ParseQuoted)
+	if err != nil {
+		return nil, fmt.Errorf("unparsable record %q received from GCLOUD: %w", rtype, err)
 	}
 	return r, nil
 }
 
-func (g *gcloudProvider) getRecords(domain string) ([]*gdns.ResourceRecordSet, string, error) {
+func (g *gcloudProvider) getRecords(domain string) ([]*gdns.ResourceRecordSet, error) {
 	zone, err := g.getZone(domain)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	pageToken := ""
 	sets := []*gdns.ResourceRecordSet{}
@@ -318,9 +426,17 @@ func (g *gcloudProvider) getRecords(domain string) ([]*gdns.ResourceRecordSet, s
 		if pageToken != "" {
 			call = call.PageToken(pageToken)
 		}
+	retry:
 		resp, err := call.Do()
+		var check *googleapi.ServerResponse
+		if resp != nil {
+			check = &resp.ServerResponse
+		}
+		if retryNeeded(check, err) {
+			goto retry
+		}
 		if err != nil {
-			return nil, "", err
+			return nil, err
 		}
 		for _, rrs := range resp.Rrsets {
 			if rrs.Type == "SOA" {
@@ -332,7 +448,7 @@ func (g *gcloudProvider) getRecords(domain string) ([]*gdns.ResourceRecordSet, s
 			break
 		}
 	}
-	return sets, zone.Name, nil
+	return sets, nil
 }
 
 func (g *gcloudProvider) EnsureZoneExists(domain string) error {
@@ -346,24 +462,33 @@ func (g *gcloudProvider) EnsureZoneExists(domain string) error {
 		return nil
 	}
 	var mz *gdns.ManagedZone
-	if g.nameServerSet != nil {
-		printer.Printf("Adding zone for %s to gcloud account with name_server_set %s\n", domain, *g.nameServerSet)
-		mz = &gdns.ManagedZone{
-			DnsName:       domain + ".",
-			NameServerSet: *g.nameServerSet,
-			Name:          "zone-" + strings.Replace(domain, ".", "-", -1),
-			Description:   "zone added by dnscontrol",
-		}
-	} else {
-		printer.Printf("Adding zone for %s to gcloud account \n", domain)
-		mz = &gdns.ManagedZone{
-			DnsName:     domain + ".",
-			Name:        "zone-" + strings.Replace(domain, ".", "-", -1),
-			Description: "zone added by dnscontrol",
-		}
+	printer.Printf("Adding zone for %s to gcloud account ", domain)
+	mz = &gdns.ManagedZone{
+		DnsName:     domain + ".",
+		Name:        "zone-" + strings.Replace(domain, ".", "-", -1),
+		Description: "zone added by dnscontrol",
 	}
-	g.zones = nil // reset cache
-	_, err = g.client.ManagedZones.Create(g.project, mz).Do()
+	if g.nameServerSet != nil {
+		mz.NameServerSet = *g.nameServerSet
+		printer.Printf("with name_server_set %s ", *g.nameServerSet)
+	}
+	if len(g.Visibility) != 0 {
+		mz.Visibility = g.Visibility
+		printer.Printf("with %s visibility ", g.Visibility)
+		// prevent possible GCP resource name conflicts when split horizon can be properly implemented
+		mz.Name = strings.Replace(mz.Name, "zone-", "zone-"+g.Visibility+"-", 1)
+	}
+	if g.Networks != nil {
+		mzn := make([]*gdns.ManagedZonePrivateVisibilityConfigNetwork, 0, len(g.Networks))
+		printer.Printf("for network(s) ")
+		for _, v := range g.Networks {
+			printer.Printf("%s ", v)
+			mzn = append(mzn, &gdns.ManagedZonePrivateVisibilityConfigNetwork{NetworkUrl: v})
+		}
+		mz.PrivateVisibilityConfig = &gdns.ManagedZonePrivateVisibilityConfig{Networks: mzn}
+	}
+	printer.Printf("\n")
+	g.zones[domain+"."], err = g.client.ManagedZones.Create(g.project, mz).Do()
 	return err
 }
 
@@ -375,7 +500,7 @@ const maxBackoff = time.Minute * 3      // Maximum backoff delay
 var backoff = initialBackoff
 var backoff404 = false // Set if the last call requested a retry of a 404
 
-func retryNeeded(resp *gdns.Change, err error) bool {
+func retryNeeded(resp *googleapi.ServerResponse, err error) bool {
 	if err != nil {
 		return false // Not an error.
 	}

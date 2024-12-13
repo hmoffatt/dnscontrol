@@ -2,7 +2,7 @@
 
 DNSControl has build in support for notifications when changes are made. This allows you to post messages in team chat, or send emails when dns changes are made.
 
-Notifications are written in the [notifications package](https://github.com/StackExchange/dnscontrol/tree/master/pkg/notifications), and is a really simple interface to implement if you want to add
+Notifications are written in the [notifications package](https://github.com/StackExchange/dnscontrol/tree/main/pkg/notifications), and is a really simple interface to implement if you want to add
 new types or destinations.
 
 ## Configuration
@@ -18,13 +18,54 @@ Notifications are set up in your credentials JSON file. They will use the `notif
         ...
   } ,
   "notifications": {
-      "slack_url": "https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX",
-      "teams_url": "https://outlook.office.com/webhook/00000000-0000-0000-0000-000000000000@00000000-0000-0000-0000-000000000000/IncomingWebhook/00000000000000000000000000000000/00000000-0000-0000-0000-000000000000"
+      "slack_url": "https://api.slack.com/apps/0XXX0X0XX0/incoming-webhooks",
+      "teams_url": "https://outlook.office.com/webhook/00000000-0000-0000-0000-000000000000@00000000-0000-0000-0000-000000000000/IncomingWebhook/00000000000000000000000000000000/00000000-0000-0000-0000-000000000000",
+      "shoutrrr_url": "discover://token@id"
   }
 ```
 {% endcode %}
 
-You also must run `dnscontrol preview` or `dnscontrol push` with the `-notify` flag to enable notification sending at all.
+## Usage
+
+If you want to send a notification, add the `--notify` flag to the `dnscontrol preview` or `dnscontrol push` commands.
+
+Below is an example where we add [the A record](language-reference/domain-modifiers/A.md) `foo` and display the notification output.
+
+{% code title="dnsconfig.js" %}
+```diff
+D("example.com", REG_MY_PROVIDER, DnsProvider(DSP_MY_PROVIDER),
++ A("foo", "1.2.3.4"),
+END);
+```
+{% endcode %}
+
+### Preview example
+
+In case of `dnscontrol preview`:
+
+```shell
+dnscontrol preview --notify
+```
+
+**The notification output**
+
+```shell
+**Preview: example.com[my_provider] -** CREATE foo.example.com A (1.2.3.4 ttl=86400)
+```
+
+### Push example
+
+In case of `dnscontrol push`:
+
+```shell
+dnscontrol push --notify
+```
+
+**The notification output**
+
+```shell
+Successfully ran correction for **example.com[my_provider]** - CREATE foo.example.com A 1.2.3.4 ttl=86400
+```
 
 ## Notification types
 
@@ -42,11 +83,23 @@ Please see the [Teams documentation](https://docs.microsoft.com/en-us/microsoftt
 
 Configure `teams_url` to this webhook.
 
+### Telegram
+
+If you want to use the [Telegram](https://telegram.org/) integration, you need to create a Telegram bot and obtain a Bot Token, as well as a Chat ID. Get a Bot Token by contacting [@BotFather](https://telegram.me/botfather), and a Chat ID by contacting [@myidbot](https://telegram.me/myidbot).
+
+Configure `telegram_bot_token` and `telegram_chat_id` to these values.
+
 ### Bonfire
 
 This is Stack Overflow's built in chat system. This is probably not useful for most people.
 
 Configure `bonfire_url` to be the full url including room and api key.
+
+### Shoutrrr (email, Discord, Pushover, etc.)
+
+DNSControl can use many other notification methods via Shoutrrr, such as email (SMTP), Discord, Pushover and others. See the [Shoutrrr documentation](https://containrrr.dev/shoutrrr/latest/services/overview/) for a list of supported methods and configuration instructions.
+
+Configure `shoutrrr_url` with the Shoutrrr URL to be notified.
 
 ## Future work
 

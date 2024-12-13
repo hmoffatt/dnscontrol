@@ -1,0 +1,28 @@
+#compdef {{.App.Name}}
+
+_dnscontrol() {
+  local -a opts
+  local cur
+  cur=${words[-1]}
+  if [[ "$cur" == "-"* ]]; then
+    opts=("${(@f)$(${words[@]:0:#words[@]-1} ${cur} --generate-bash-completion)}")
+  else
+    opts=("${(@f)$(${words[@]:0:#words[@]-1} --generate-bash-completion)}")
+  fi
+
+  if [[ "${opts[1]}" != "" ]]; then
+    _describe 'values' opts
+  else
+    _files
+  fi
+}
+
+# Run the function the first time we are auto-loaded, otherwise the very first
+# complete wouldn't work in each shell session
+# Otherwise assume we are directly sourced and register the completion
+# (This is done by the #compdef directive in the autoloaded case.)
+if [[ "${zsh_eval_context[-1]}" == "loadautofunc" ]]; then
+  _dnscontrol "$@"
+else
+  compdef "_dnscontrol" "dnscontrol"
+fi

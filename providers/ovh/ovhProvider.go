@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/StackExchange/dnscontrol/v4/models"
-	"github.com/StackExchange/dnscontrol/v4/pkg/diff"
 	"github.com/StackExchange/dnscontrol/v4/pkg/diff2"
 	"github.com/StackExchange/dnscontrol/v4/providers"
 	"github.com/ovh/go-ovh/ovh"
@@ -19,7 +18,10 @@ type ovhProvider struct {
 }
 
 var features = providers.DocumentationNotes{
+	// The default for unlisted capabilities is 'Cannot'.
+	// See providers/capabilities.go for the entire list of capabilities.
 	providers.CanGetZones:            providers.Can(),
+	providers.CanConcur:              providers.Cannot(),
 	providers.CanUseAlias:            providers.Cannot(),
 	providers.CanUseCAA:              providers.Can(),
 	providers.CanUseLOC:              providers.Unimplemented(),
@@ -32,10 +34,10 @@ var features = providers.DocumentationNotes{
 	providers.DocOfficiallySupported: providers.Cannot(),
 }
 
-func newOVH(m map[string]string, metadata json.RawMessage) (*ovhProvider, error) {
+func newOVH(m map[string]string, _ json.RawMessage) (*ovhProvider, error) {
 	appKey, appSecretKey, consumerKey := m["app-key"], m["app-secret-key"], m["consumer-key"]
 
-	c, err := ovh.NewClient(ovh.OvhEU, appKey, appSecretKey, consumerKey)
+	c, err := ovh.NewClient(getOVHEndpoint(m), appKey, appSecretKey, consumerKey)
 	if c == nil {
 		return nil, err
 	}
@@ -47,6 +49,22 @@ func newOVH(m map[string]string, metadata json.RawMessage) (*ovhProvider, error)
 	return ovh, nil
 }
 
+func getOVHEndpoint(params map[string]string) string {
+	if ep, ok := params["endpoint"]; ok && ep != "" {
+		switch strings.ToLower(ep) {
+		case "eu":
+			return ovh.OvhEU
+		case "ca":
+			return ovh.OvhCA
+		case "us":
+			return ovh.OvhUS
+		default:
+			return ep
+		}
+	}
+	return ovh.OvhEU
+}
+
 func newDsp(conf map[string]string, metadata json.RawMessage) (providers.DNSServiceProvider, error) {
 	return newOVH(conf, metadata)
 }
@@ -56,12 +74,15 @@ func newReg(conf map[string]string) (providers.Registrar, error) {
 }
 
 func init() {
+	const providerName = "OVH"
+	const providerMaintainer = "@masterzen"
 	fns := providers.DspFuncs{
 		Initializer:   newDsp,
 		RecordAuditor: AuditRecords,
 	}
-	providers.RegisterRegistrarType("OVH", newReg)
-	providers.RegisterDomainServiceProviderType("OVH", fns, features)
+	providers.RegisterRegistrarType(providerName, newReg)
+	providers.RegisterDomainServiceProviderType(providerName, fns, features)
+	providers.RegisterMaintainer(providerName, providerMaintainer)
 }
 
 func (c *ovhProvider) GetNameservers(domain string) ([]*models.Nameserver, error) {
@@ -120,21 +141,23 @@ func (c *ovhProvider) GetZoneRecords(domain string, meta map[string]string) (mod
 }
 
 // GetZoneRecordsCorrections returns a list of corrections that will turn existing records into dc.Records.
-func (c *ovhProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, actual models.Records) ([]*models.Correction, error) {
+func (c *ovhProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, actual models.Records) ([]*models.Correction, int, error) {
 
-	var corrections []*models.Correction
-	var err error
-	if !diff2.EnableDiff2 {
-		corrections, err = c.getDiff1DomainCorrections(dc, actual)
-	} else {
-		corrections, err = c.getDiff2DomainCorrections(dc, actual)
-	}
-
+	corrections, actualChangeCount, err := c.getDiff2DomainCorrections(dc, actual)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
-	if len(corrections) > 0 {
+	// Only refresh zone if there's a real modification
+	reportOnlyCorrections := true
+	for _, c := range corrections {
+		if c.F != nil {
+			reportOnlyCorrections = false
+			break
+		}
+	}
+
+	if !reportOnlyCorrections {
 		corrections = append(corrections, &models.Correction{
 			Msg: "REFRESH zone " + dc.Name,
 			F: func() error {
@@ -143,50 +166,14 @@ func (c *ovhProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, actual 
 		})
 	}
 
-	return corrections, nil
+	return corrections, actualChangeCount, nil
 }
 
-func (c *ovhProvider) getDiff1DomainCorrections(dc *models.DomainConfig, actual models.Records) ([]*models.Correction, error) {
+func (c *ovhProvider) getDiff2DomainCorrections(dc *models.DomainConfig, actual models.Records) ([]*models.Correction, int, error) {
 	var corrections []*models.Correction
-
-	differ := diff.New(dc)
-	_, create, delete, modify, err := differ.IncrementalDiff(actual)
+	instructions, actualChangeCount, err := diff2.ByRecord(actual, dc, nil)
 	if err != nil {
-		return nil, err
-	}
-
-	for _, del := range delete {
-		rec := del.Existing.Original.(*Record)
-		corrections = append(corrections, &models.Correction{
-			Msg: del.String(),
-			F:   c.deleteRecordFunc(rec.ID, dc.Name),
-		})
-	}
-
-	for _, cre := range create {
-		rec := cre.Desired
-		corrections = append(corrections, &models.Correction{
-			Msg: cre.String(),
-			F:   c.createRecordFunc(rec, dc.Name),
-		})
-	}
-
-	for _, mod := range modify {
-		oldR := mod.Existing.Original.(*Record)
-		newR := mod.Desired
-		corrections = append(corrections, &models.Correction{
-			Msg: mod.String(),
-			F:   c.updateRecordFunc(oldR, newR, dc.Name),
-		})
-	}
-	return corrections, nil
-}
-
-func (c *ovhProvider) getDiff2DomainCorrections(dc *models.DomainConfig, actual models.Records) ([]*models.Correction, error) {
-	var corrections []*models.Correction
-	instructions, err := diff2.ByRecord(actual, dc, nil)
-	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	for _, inst := range instructions {
@@ -213,7 +200,7 @@ func (c *ovhProvider) getDiff2DomainCorrections(dc *models.DomainConfig, actual 
 			panic(fmt.Sprintf("unhandled inst.Type %s", inst.Type))
 		}
 	}
-	return corrections, nil
+	return corrections, actualChangeCount, nil
 }
 
 func nativeToRecord(r *Record, origin string) (*models.RecordConfig, error) {
@@ -227,8 +214,8 @@ func nativeToRecord(r *Record, origin string) (*models.RecordConfig, error) {
 
 	rtype := r.FieldType
 
-	// ovh uses a custom type for SPF and DKIM
-	if rtype == "SPF" || rtype == "DKIM" {
+	// ovh uses a custom type for SPF, DKIM and DMARC
+	if rtype == "SPF" || rtype == "DKIM" || rtype == "DMARC" {
 		rtype = "TXT"
 	}
 

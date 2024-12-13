@@ -9,9 +9,7 @@ import (
 
 	"github.com/StackExchange/dnscontrol/v4/models"
 	"github.com/StackExchange/dnscontrol/v4/pkg/diff"
-	"github.com/StackExchange/dnscontrol/v4/pkg/diff2"
 	"github.com/StackExchange/dnscontrol/v4/pkg/printer"
-	"github.com/StackExchange/dnscontrol/v4/pkg/txtutil"
 	"github.com/StackExchange/dnscontrol/v4/providers"
 	"github.com/nrdcg/goinwx"
 	"github.com/pquerna/otp/totp"
@@ -43,16 +41,21 @@ var InwxSandboxDefaultNs = []string{"ns.ote.inwx.de", "ns2.ote.inwx.de"}
 
 // features is used to let dnscontrol know which features are supported by INWX.
 var features = providers.DocumentationNotes{
+	// The default for unlisted capabilities is 'Cannot'.
+	// See providers/capabilities.go for the entire list of capabilities.
 	providers.CanAutoDNSSEC:          providers.Unimplemented("Supported by INWX but not implemented yet."),
 	providers.CanGetZones:            providers.Can(),
+	providers.CanConcur:              providers.Cannot(),
 	providers.CanUseAlias:            providers.Cannot("INWX does not support the ALIAS or ANAME record type."),
 	providers.CanUseCAA:              providers.Can(),
 	providers.CanUseDS:               providers.Unimplemented("DS records are only supported at the apex and require a different API call that hasn't been implemented yet."),
+	providers.CanUseHTTPS:            providers.Can(),
 	providers.CanUseLOC:              providers.Unimplemented(),
 	providers.CanUseNAPTR:            providers.Can(),
 	providers.CanUsePTR:              providers.Can("PTR records with empty targets are not supported"),
 	providers.CanUseSRV:              providers.Can("SRV records with empty targets are not supported."),
 	providers.CanUseSSHFP:            providers.Can(),
+	providers.CanUseSVCB:             providers.Can(),
 	providers.CanUseTLSA:             providers.Can(),
 	providers.DocCreateDomains:       providers.Can(),
 	providers.DocDualHost:            providers.Can(),
@@ -68,12 +71,15 @@ type inwxAPI struct {
 
 // init registers the registrar and the domain service provider with dnscontrol.
 func init() {
-	providers.RegisterRegistrarType("INWX", newInwxReg)
+	const providerName = "INWX"
+	const providerMaintainer = "@patschi"
+	providers.RegisterRegistrarType(providerName, newInwxReg)
 	fns := providers.DspFuncs{
 		Initializer:   newInwxDsp,
 		RecordAuditor: AuditRecords,
 	}
-	providers.RegisterDomainServiceProviderType("INWX", fns, features)
+	providers.RegisterDomainServiceProviderType(providerName, fns, features)
+	providers.RegisterMaintainer(providerName, providerMaintainer)
 }
 
 // getOTP either returns the TOTPValue or uses TOTPKey and the current time to generate a valid TOTPValue.
@@ -182,7 +188,11 @@ func makeNameserverRecordRequest(domain string, rec *models.RecordConfig) *goinw
 		req.Content = content[:len(content)-1]
 	case "MX":
 		req.Priority = int(rec.MxPreference)
-		req.Content = content[:len(content)-1]
+		if content == "." {
+			req.Content = content
+		} else {
+			req.Content = content[:len(content)-1]
+		}
 	case "SRV":
 		req.Priority = int(rec.SrvPriority)
 		req.Content = fmt.Sprintf("%d %d %v", rec.SrvWeight, rec.SrvPort, content[:len(content)-1])
@@ -214,12 +224,11 @@ func (api *inwxAPI) deleteRecord(RecordID int) error {
 
 // checkRecords ensures that there is no single-quote inside TXT records which would be ignored by INWX.
 func checkRecords(records models.Records) error {
+	// TODO(tlim) Remove this function.  auditrecords.go takes care of this now.
 	for _, r := range records {
 		if r.Type == "TXT" {
-			for _, target := range r.TxtStrings {
-				if strings.ContainsAny(target, "`") {
-					return fmt.Errorf("INWX TXT records do not support single-quotes in their target")
-				}
+			if strings.ContainsAny(r.GetTargetTXTJoined(), "`") {
+				return fmt.Errorf("INWX TXT records do not support single-quotes in their target")
 			}
 		}
 	}
@@ -227,26 +236,18 @@ func checkRecords(records models.Records) error {
 }
 
 // GetZoneRecordsCorrections returns a list of corrections that will turn existing records into dc.Records.
-func (api *inwxAPI) GetZoneRecordsCorrections(dc *models.DomainConfig, foundRecords models.Records) ([]*models.Correction, error) {
-
-	txtutil.SplitSingleLongTxt(dc.Records) // Autosplit long TXT records
-
+func (api *inwxAPI) GetZoneRecordsCorrections(dc *models.DomainConfig, foundRecords models.Records) ([]*models.Correction, int, error) {
 	err := checkRecords(dc.Records)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
-	var corrections []*models.Correction
-	var differ diff.Differ
-	if !diff2.EnableDiff2 {
-		differ = diff.New(dc)
-	} else {
-		differ = diff.NewCompat(dc)
-	}
-	_, create, del, mod, err := differ.IncrementalDiff(foundRecords)
+	toReport, create, del, mod, actualChangeCount, err := diff.NewCompat(dc).IncrementalDiff(foundRecords)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
+	// Start corrections with the reports
+	corrections := diff.GenerateMessageCorrections(toReport)
 
 	for _, d := range create {
 		des := d.Desired
@@ -271,7 +272,7 @@ func (api *inwxAPI) GetZoneRecordsCorrections(dc *models.DomainConfig, foundReco
 		})
 	}
 
-	return corrections, nil
+	return corrections, actualChangeCount, nil
 }
 
 // getDefaultNameservers returns string map with default nameservers based on e.g. sandbox mode.
@@ -308,8 +309,19 @@ func (api *inwxAPI) GetZoneRecords(domain string, meta map[string]string) (model
 		   Records with empty targets (i.e. records with target ".")
 		   are not allowed.
 		*/
-		if record.Type == "CNAME" || record.Type == "MX" || record.Type == "NS" || record.Type == "SRV" {
-			record.Content = record.Content + "."
+		var rtypeAddDot = map[string]bool{
+			"CNAME": true,
+			"MX":    true,
+			"NS":    true,
+			"SRV":   true,
+			"PTR":   true,
+		}
+		if rtypeAddDot[record.Type] {
+			if record.Type == "MX" && record.Content == "." {
+				// null records don't need to be modified
+			} else {
+				record.Content = record.Content + "."
+			}
 		}
 
 		rc := &models.RecordConfig{
@@ -334,6 +346,22 @@ func (api *inwxAPI) GetZoneRecords(domain string, meta map[string]string) (model
 	}
 
 	return records, nil
+}
+
+// ListZones returns the zones configured in INWX.
+func (api *inwxAPI) ListZones() ([]string, error) {
+	if api.domainIndex == nil { // only pull the data once.
+		if err := api.fetchNameserverDomains(); err != nil {
+			return nil, err
+		}
+	}
+
+	var domains []string
+	for domain := range api.domainIndex {
+		domains = append(domains, domain)
+	}
+
+	return domains, nil
 }
 
 // updateNameservers is used by GetRegistrarCorrections to update the domain's nameservers.
@@ -378,17 +406,24 @@ func (api *inwxAPI) GetRegistrarCorrections(dc *models.DomainConfig) ([]*models.
 
 // fetchNameserverDomains returns the domains configured in INWX nameservers
 func (api *inwxAPI) fetchNameserverDomains() error {
-	request := &goinwx.DomainListRequest{}
-	info, err := api.client.Domains.List(request)
-	if err != nil {
-		return err
+	zones := map[string]int{}
+	request := &goinwx.NameserverListRequest{}
+	page := 1
+	for {
+		request.Page = page
+		info, err := api.client.Nameservers.ListWithParams(request)
+		if err != nil {
+			return err
+		}
+		for _, domain := range info.Domains {
+			zones[domain.Domain] = domain.RoID
+		}
+		if len(zones) >= info.Count {
+			break
+		}
+		page++
 	}
-
-	api.domainIndex = map[string]int{}
-	for _, domain := range info.Domains {
-		api.domainIndex[domain.Domain] = domain.RoID
-	}
-
+	api.domainIndex = zones
 	return nil
 }
 

@@ -5,7 +5,6 @@ import (
 
 	"github.com/StackExchange/dnscontrol/v4/models"
 	"github.com/StackExchange/dnscontrol/v4/pkg/diff"
-	"github.com/StackExchange/dnscontrol/v4/pkg/diff2"
 )
 
 // GetZoneRecords gets the records of a zone and returns them in RecordConfig format.
@@ -76,21 +75,14 @@ func (client *providerClient) GetNameservers(domain string) ([]*models.Nameserve
 }
 
 // GetZoneRecordsCorrections returns a list of corrections that will turn existing records into dc.Records.
-func (client *providerClient) GetZoneRecordsCorrections(dc *models.DomainConfig, foundRecords models.Records) ([]*models.Correction, error) {
-	//txtutil.SplitSingleLongTxt(dc.Records) // Autosplit long TXT records
+func (client *providerClient) GetZoneRecordsCorrections(dc *models.DomainConfig, foundRecords models.Records) ([]*models.Correction, int, error) {
 
-	var corrections []*models.Correction
-	var err error
-	var differ diff.Differ
-	if !diff2.EnableDiff2 {
-		differ = diff.New(dc)
-	} else {
-		differ = diff.NewCompat(dc)
-	}
-	_, creates, dels, modifications, err := differ.IncrementalDiff(foundRecords)
+	toReport, creates, dels, modifications, actualChangeCount, err := diff.NewCompat(dc).IncrementalDiff(foundRecords)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
+	// Start corrections with the reports
+	corrections := diff.GenerateMessageCorrections(toReport)
 
 	// CSCGlobal has a unique API.  A list of edits is sent in one API
 	// call. Edits aren't permitted if an existing edit is being
@@ -100,15 +92,15 @@ func (client *providerClient) GetZoneRecordsCorrections(dc *models.DomainConfig,
 	var edits []zoneResourceRecordEdit
 	var descriptions []string
 	for _, del := range dels {
-		edits = append(edits, makePurge(dc.Name, del))
+		edits = append(edits, makePurge(del))
 		descriptions = append(descriptions, del.String())
 	}
 	for _, cre := range creates {
-		edits = append(edits, makeAdd(dc.Name, cre))
+		edits = append(edits, makeAdd(cre))
 		descriptions = append(descriptions, cre.String())
 	}
 	for _, m := range modifications {
-		edits = append(edits, makeEdit(dc.Name, m))
+		edits = append(edits, makeEdit(m))
 		descriptions = append(descriptions, m.String())
 	}
 	if len(edits) > 0 {
@@ -131,15 +123,15 @@ func (client *providerClient) GetZoneRecordsCorrections(dc *models.DomainConfig,
 		corrections = append(corrections, c)
 	}
 
-	return corrections, nil
+	return corrections, actualChangeCount, nil
 }
 
-func makePurge(domainname string, cor diff.Correlation) zoneResourceRecordEdit {
+func makePurge(cor diff.Correlation) zoneResourceRecordEdit {
 	var existingTarget string
 
 	switch cor.Existing.Type {
 	case "TXT":
-		existingTarget = strings.Join(cor.Existing.TxtStrings, "")
+		existingTarget = cor.Existing.GetTargetTXTJoined()
 	default:
 		existingTarget = cor.Existing.GetTargetField()
 	}
@@ -160,13 +152,13 @@ func makePurge(domainname string, cor diff.Correlation) zoneResourceRecordEdit {
 	return zer
 }
 
-func makeAdd(domainname string, cre diff.Correlation) zoneResourceRecordEdit {
+func makeAdd(cre diff.Correlation) zoneResourceRecordEdit {
 	rec := cre.Desired
 
 	var recTarget string
 	switch rec.Type {
 	case "TXT":
-		recTarget = strings.Join(rec.TxtStrings, "")
+		recTarget = rec.GetTargetTXTJoined()
 	default:
 		recTarget = rec.GetTargetField()
 	}
@@ -192,7 +184,7 @@ func makeAdd(domainname string, cre diff.Correlation) zoneResourceRecordEdit {
 		zer.NewWeight = rec.SrvWeight
 		zer.NewPort = rec.SrvPort
 	case "TXT":
-		zer.NewValue = strings.Join(rec.TxtStrings, "")
+		zer.NewValue = rec.GetTargetTXTJoined()
 	default: // "A", "CNAME", "NS"
 		// Nothing to do.
 	}
@@ -200,7 +192,7 @@ func makeAdd(domainname string, cre diff.Correlation) zoneResourceRecordEdit {
 	return zer
 }
 
-func makeEdit(domainname string, m diff.Correlation) zoneResourceRecordEdit {
+func makeEdit(m diff.Correlation) zoneResourceRecordEdit {
 	old, rec := m.Existing, m.Desired
 	// TODO: Assert that old.Type == rec.Type
 	// TODO: Assert that old.Name == rec.Name
@@ -208,8 +200,8 @@ func makeEdit(domainname string, m diff.Correlation) zoneResourceRecordEdit {
 	var oldTarget, recTarget string
 	switch old.Type {
 	case "TXT":
-		oldTarget = strings.Join(old.TxtStrings, "")
-		recTarget = strings.Join(rec.TxtStrings, "")
+		oldTarget = old.GetTargetTXTJoined()
+		recTarget = rec.GetTargetTXTJoined()
 	default:
 		oldTarget = old.GetTargetField()
 		recTarget = rec.GetTargetField()

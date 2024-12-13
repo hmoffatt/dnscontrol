@@ -23,8 +23,11 @@ type domainNameShopProvider struct {
 }
 
 var features = providers.DocumentationNotes{
-	providers.CanAutoDNSSEC:          providers.Cannot(),                                     // Maybe there is support for it
-	providers.CanGetZones:            providers.Unimplemented(),                              //
+	// The default for unlisted capabilities is 'Cannot'.
+	// See providers/capabilities.go for the entire list of capabilities.
+	providers.CanAutoDNSSEC:          providers.Cannot(),        // Maybe there is support for it
+	providers.CanGetZones:            providers.Unimplemented(), //
+	providers.CanConcur:              providers.Cannot(),
 	providers.CanUseAlias:            providers.Unimplemented("Needs custom implementation"), // Can possibly be implemented, needs further research
 	providers.CanUseCAA:              providers.Can(),
 	providers.CanUseDS:               providers.Unimplemented(), // Seems to support but needs to be implemented
@@ -44,12 +47,15 @@ var features = providers.DocumentationNotes{
 // Register with the dnscontrol system.
 // This establishes the name (all caps), and the function to call to initialize it.
 func init() {
+	const providerName = "DOMAINNAMESHOP"
+	const providerMaintainer = "@SimenBai"
 	fns := providers.DspFuncs{
 		Initializer:   newDomainNameShopProvider,
 		RecordAuditor: AuditRecords,
 	}
 
-	providers.RegisterDomainServiceProviderType("DOMAINNAMESHOP", fns, features)
+	providers.RegisterDomainServiceProviderType(providerName, fns, features)
+	providers.RegisterMaintainer(providerName, providerMaintainer)
 }
 
 // newDomainNameShopProvider creates a Domainnameshop specific DNS provider.
