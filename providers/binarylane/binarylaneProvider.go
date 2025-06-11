@@ -299,8 +299,8 @@ func checkNSModifications(dc *models.DomainConfig) {
 	newList := make([]*models.RecordConfig, 0, len(dc.Records))
 	for _, rec := range dc.Records {
 		if rec.Type == "NS" && rec.GetLabelFQDN() == dc.Name {
-			if strings.HasSuffix(rec.GetTargetField(), ".porkbun.com") {
-				printer.Warnf("porkbun does not support modifying NS records on base domain. %s will not be added.\n", rec.GetTargetField())
+			if strings.HasSuffix(rec.GetTargetField(), ".binarylane.com.au") {
+				printer.Warnf("binarylane does not support modifying NS records on base domain. %s will not be added.\n", rec.GetTargetField())
 			}
 			continue
 		}
