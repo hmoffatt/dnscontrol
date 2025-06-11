@@ -8,6 +8,7 @@ import (
 	_ "github.com/StackExchange/dnscontrol/v4/providers/axfrddns"
 	_ "github.com/StackExchange/dnscontrol/v4/providers/azuredns"
 	_ "github.com/StackExchange/dnscontrol/v4/providers/azureprivatedns"
+	_ "github.com/StackExchange/dnscontrol/v4/providers/binarylane"
 	_ "github.com/StackExchange/dnscontrol/v4/providers/bind"
 	_ "github.com/StackExchange/dnscontrol/v4/providers/bunnydns"
 	_ "github.com/StackExchange/dnscontrol/v4/providers/cloudflare"
