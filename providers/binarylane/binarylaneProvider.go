@@ -84,7 +84,7 @@ func init() {
 // GetNameservers returns the nameservers for a domain.
 func (c *binarylaneProvider) GetNameservers(domain string) ([]*models.Nameserver, error) {
 	nameservers, err := c.getNameservers(domain)
-	if err == nil {
+	if err != nil {
 		return nil, err
 	}
 	return models.ToNameservers(nameservers)
@@ -173,20 +173,6 @@ func (c *binarylaneProvider) GetZoneRecords(domain string, meta map[string]strin
 		existingRecords = append(existingRecords, newr)
 	}
 
-	ns, err := c.getNameservers(domain)
-	if err != nil {
-		return nil, err
-	}
-	for i := range ns {
-		newr := &models.RecordConfig{}
-		newr.Original = &domainRecord{}
-		newr.Type = "NS"
-		newr.TTL = 86400
-		newr.SetLabel("@", domain)
-		newr.SetTarget(ns[i])
-		existingRecords = append(existingRecords, newr)
-	}
-
 	return existingRecords, nil
 }
 
@@ -272,21 +258,21 @@ func toReq(rc *models.RecordConfig) (requestParams, error) {
 	case "A", "AAAA", "NS", "ALIAS", "CNAME":
 	// Nothing special.
 	case "TXT":
-		req["content"] = rc.GetTargetTXTJoined()
+		req["data"] = rc.GetTargetTXTJoined()
 	case "MX":
-		req["prio"] = int(rc.MxPreference)
+		req["priority"] = int(rc.MxPreference)
 	case "SRV":
-		req["prio"] = strconv.Itoa(int(rc.SrvPriority))
-		req["content"] = fmt.Sprintf("%d %d %s", rc.SrvWeight, rc.SrvPort, rc.GetTargetField())
+		req["priority"] = strconv.Itoa(int(rc.SrvPriority))
+		req["data"] = fmt.Sprintf("%d %d %s", rc.SrvWeight, rc.SrvPort, rc.GetTargetField())
 	case "CAA":
-		req["content"] = fmt.Sprintf("%d %s \"%s\"", rc.CaaFlag, rc.CaaTag, rc.GetTargetField())
+		req["data"] = fmt.Sprintf("%d %s \"%s\"", rc.CaaFlag, rc.CaaTag, rc.GetTargetField())
 	case "TLSA":
-		req["content"] = fmt.Sprintf("%d %d %d %s",
+		req["data"] = fmt.Sprintf("%d %d %d %s",
 			rc.TlsaUsage, rc.TlsaSelector, rc.TlsaMatchingType, rc.GetTargetField())
 	case "HTTPS":
 		fallthrough
 	case "SVCB":
-		req["content"] = fmt.Sprintf("%d %s %s",
+		req["data"] = fmt.Sprintf("%d %s %s",
 			rc.SvcPriority, rc.GetTargetField(), rc.SvcParams)
 	default:
 		return nil, fmt.Errorf("binarylane.toReq rtype %q unimplemented", rc.Type)
