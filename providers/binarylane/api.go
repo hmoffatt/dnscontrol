@@ -53,7 +53,7 @@ type domainListResponse struct {
 }
 
 type nsResponse struct {
-	Nameservers []string `json:"current_nameservers"`
+	Nameservers []string `json:"local_nameservers"`
 }
 
 func (c *binarylaneProvider) req(method string, endpoint string, body io.Reader) ([]byte, error) {
@@ -154,8 +154,7 @@ func (c *binarylaneProvider) getRecords(domain string) ([]domainRecord, error) {
 }
 
 func (c *binarylaneProvider) getNameservers(domain string) ([]string, error) {
-	fmt.Printf("getNameservers\n")
-	bodyString, err := c.get("/domain/" + domain)
+	bodyString, err := c.get("/domains/nameservers")
 	if err != nil {
 		return nil, fmt.Errorf("failed fetching nameserver list from binarylane: %w", err)
 	}

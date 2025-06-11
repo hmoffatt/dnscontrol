@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -84,7 +83,11 @@ func init() {
 
 // GetNameservers returns the nameservers for a domain.
 func (c *binarylaneProvider) GetNameservers(domain string) ([]*models.Nameserver, error) {
-	return models.ToNameservers(defaultNS)
+	nameservers, err := c.getNameservers(domain)
+	if err == nil {
+		return nil, err
+	}
+	return models.ToNameservers(nameservers)
 }
 
 func genComparable(rec *models.RecordConfig) string {
@@ -163,38 +166,27 @@ func (c *binarylaneProvider) GetZoneRecords(domain string, meta map[string]strin
 	}
 	existingRecords := make([]*models.RecordConfig, 0)
 	for i := range records {
-		shouldSkip := false
-		// if strings.HasSuffix(records[i].Content, ".porkbun.com") {
-		// 	name := dnsutil.TrimDomainName(records[i].Name, domain)
-		// 	if name == "@" {
-		// 		name = ""
-		// 	}
-		// 	if records[i].Type == "ALIAS" {
-		// 		for _, forward := range forwards {
-		// 			if name == forward.Subdomain {
-		// 				shouldSkip = true
-		// 				break
-		// 			}
-		// 		}
-		// 	}
-		// 	if records[i].Type == "CNAME" {
-		// 		for _, forward := range forwards {
-		// 			if name == "*."+forward.Subdomain {
-		// 				shouldSkip = true
-		// 				break
-		// 			}
-		// 		}
-		// 	}
-		// }
-		if shouldSkip {
-			continue
-		}
 		newr, err := toRc(domain, &records[i])
 		if err != nil {
 			return nil, err
 		}
 		existingRecords = append(existingRecords, newr)
 	}
+
+	ns, err := c.getNameservers(domain)
+	if err != nil {
+		return nil, err
+	}
+	for i := range ns {
+		newr := &models.RecordConfig{}
+		newr.Original = &domainRecord{}
+		newr.Type = "NS"
+		newr.TTL = 86400
+		newr.SetLabel("@", domain)
+		newr.SetTarget(ns[i])
+		existingRecords = append(existingRecords, newr)
+	}
+
 	return existingRecords, nil
 }
 
@@ -322,32 +314,4 @@ func fixTTL(ttl uint32) uint32 {
 		return ttl
 	}
 	return minimumTTL
-}
-
-func (c *binarylaneProvider) GetRegistrarCorrections(dc *models.DomainConfig) ([]*models.Correction, error) {
-	nss, err := c.getNameservers(dc.Name)
-	if err != nil {
-		return nil, err
-	}
-	foundNameservers := strings.Join(nss, ",")
-
-	expected := []string{}
-	for _, ns := range dc.Nameservers {
-		expected = append(expected, ns.Name)
-	}
-	sort.Strings(expected)
-	expectedNameservers := strings.Join(expected, ",")
-
-	if foundNameservers == expectedNameservers {
-		return nil, nil
-	}
-
-	return []*models.Correction{
-		{
-			Msg: fmt.Sprintf("Update nameservers %s -> %s", foundNameservers, expectedNameservers),
-			F: func() error {
-				return c.updateNameservers(expected, dc.Name)
-			},
-		},
-	}, nil
 }
